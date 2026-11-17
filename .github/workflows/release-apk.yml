@@ -95,7 +95,7 @@ jobs:
 
       - name: Build Signed Release APK
         env:
-          KEYSTORE_PATH: "${GITHUB_WORKSPACE}/my-upload-key.jks"
+          KEYSTORE_PATH: "${{ github.workspace }}/my-upload-key.jks"
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         shell: bash
@@ -231,4 +231,4 @@ jobs:
       - name: Clean Up Decoded Keystore
         if: always()
         shell: bash
-        run: rm -f "${GITHUB_WORKSPACE}/my-upload-key.jks"
+        run: rm -f "${{ github.workspace }}/my-upload-key.jks"
