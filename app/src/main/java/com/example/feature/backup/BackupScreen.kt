@@ -21,24 +21,29 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.LockOpen
+import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -57,8 +62,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.core.designsystem.FormSectionCard
 import com.example.core.designsystem.OfflinePrivacyBanner
+import com.example.core.files.SavedVaultBackupEntry
 import com.example.domain.model.AccountWithDetails
 import com.example.domain.model.CategoryWithCount
 import com.example.domain.model.ServiceWithCount
@@ -73,6 +81,7 @@ fun BackupScreen(
     accounts: List<AccountWithDetails>,
     services: List<ServiceWithCount>,
     categories: List<CategoryWithCount>,
+    savedVaultBackups: List<SavedVaultBackupEntry>,
     stagedBackup: StagedBackupPackage?,
     conflictResolutions: Map<String, ConflictResolution>,
     generatedExportLockKey: String?,
@@ -85,16 +94,23 @@ fun BackupScreen(
         onError: (String) -> Unit
     ) -> Unit,
     onClearGeneratedExportLockKey: () -> Unit,
+    onSavePendingBackupDirectly: (fileName: String, onError: (String) -> Unit) -> Unit,
     onWritePendingBackupToUri: (Uri) -> Unit,
+    onSavePlaintextCsvDirectly: (fileName: String, onError: (String) -> Unit) -> Unit,
     onPreparePlaintextCsv: (onReadyForSafSave: () -> Unit, onError: (String) -> Unit) -> Unit,
     onWritePendingCsvToUri: (Uri) -> Unit,
+    onStageBackupFromVaultFile: (vaultFilePath: String, lockKey: String, onError: (String) -> Unit) -> Unit,
     onStageBackupFromUri: (Uri, String, onError: (String) -> Unit) -> Unit,
+    onDeleteVaultBackupFile: (vaultFilePath: String) -> Unit,
     onUpdateConflictResolution: (String, ConflictResolution) -> Unit,
     onCancelStagedBackup: () -> Unit,
     onCommitStagedBackup: (onError: (String) -> Unit) -> Unit
 ) {
     val context = LocalContext.current
-    var selectedExportMode by rememberSaveable { mutableStateOf(ExportMode.FULL) }
+    var selectedExportModeName by rememberSaveable { mutableStateOf(ExportMode.FULL.name) }
+    val selectedExportMode = remember(selectedExportModeName) {
+        ExportMode.entries.firstOrNull { it.name == selectedExportModeName } ?: ExportMode.FULL
+    }
     var selectedAccountIds by remember { mutableStateOf(setOf<String>()) }
     var selectedServiceIds by remember { mutableStateOf(setOf<String>()) }
     var selectedCategoryIds by remember { mutableStateOf(setOf<String>()) }
@@ -104,11 +120,13 @@ fun BackupScreen(
     var copiedKeyNotice by remember { mutableStateOf(false) }
 
     var showPlainCsvConfirm by remember { mutableStateOf(false) }
+    var showImportSourceModal by remember { mutableStateOf(false) }
     var pendingImportUri by remember { mutableStateOf<Uri?>(null) }
+    var pendingImportVaultEntry by remember { mutableStateOf<SavedVaultBackupEntry?>(null) }
     var importLockKeyInput by remember { mutableStateOf("") }
     var errorMessage by remember { mutableStateOf<String?>(null) }
 
-    val timestamp = remember { SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).format(Date()) }
+    val dateFormatter = remember { SimpleDateFormat("MMM dd, yyyy HH:mm", Locale.US) }
 
     val createEncryptedBackupLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/octet-stream")
@@ -131,10 +149,15 @@ fun BackupScreen(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
         if (uri != null) {
+            pendingImportVaultEntry = null
             pendingImportUri = uri
             importLockKeyInput = ""
             errorMessage = null
         }
+    }
+
+    val encryptedVaultBackups = remember(savedVaultBackups) {
+        savedVaultBackups.filter { it.isEncryptedBackup }
     }
 
     LazyColumn(
@@ -152,7 +175,7 @@ fun BackupScreen(
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    text = "Export locked backups protected by an app-generated Export Lock Key, or import an existing .dao-backup file.",
+                    text = "Export locked backups directly to Downloads & Built-In Backup Vault, or restore with your Export Lock Key.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -161,7 +184,7 @@ fun BackupScreen(
 
         item {
             OfflinePrivacyBanner(
-                noticeText = "When you export a .dao-backup file, the application automatically generates a unique random Export Lock Key (e.g. DAO-XXXX-XXXX-XXXX-XXXX) and encrypts the file with AES-256-GCM + Argon2id. Copy and keep that key—anyone trying to import the file must enter it."
+                noticeText = "When you export a .dao-backup file, the application automatically generates a unique random Export Lock Key (e.g. DAO-XXXX-XXXX-XXXX-XXXX) and encrypts the file with AES-256-GCM + Argon2id. Files are saved directly to Downloads and your Built-In Backup Vault list."
             )
         }
 
@@ -185,162 +208,143 @@ fun BackupScreen(
 
         // 1. Export Locked .dao-backup Card
         item {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))
+            FormSectionCard(
+                title = "Locked Encrypted Backup (.dao-backup)",
+                subtitle = "Includes standalone Accounts, Services, Service Account entries, encrypted Passwords, custom logos, and Recovery Code metadata.",
+                icon = Icons.Default.Lock
             ) {
-                Column(
+                Text(
+                    text = "Export Scope",
+                    style = MaterialTheme.typography.labelLarge
+                )
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    ExportMode.entries.forEach { mode ->
+                        FilterChip(
+                            selected = selectedExportMode == mode,
+                            onClick = { selectedExportModeName = mode.name },
+                            label = { Text(mode.displayLabel) },
+                            modifier = Modifier.testTag("export_mode_${mode.name}")
+                        )
+                    }
+                }
+
+                when (selectedExportMode) {
+                    ExportMode.FULL -> Unit
+                    ExportMode.SELECTED_ACCOUNTS -> {
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            accounts.forEach { acc ->
+                                val selected = acc.account.id in selectedAccountIds
+                                FilterChip(
+                                    selected = selected,
+                                    onClick = {
+                                        selectedAccountIds = if (selected) {
+                                            selectedAccountIds - acc.account.id
+                                        } else {
+                                            selectedAccountIds + acc.account.id
+                                        }
+                                    },
+                                    label = { Text(acc.account.displayName) }
+                                )
+                            }
+                        }
+                    }
+                    ExportMode.SELECTED_SERVICES -> {
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            services.forEach { svc ->
+                                val selected = svc.service.id in selectedServiceIds
+                                FilterChip(
+                                    selected = selected,
+                                    onClick = {
+                                        selectedServiceIds = if (selected) {
+                                            selectedServiceIds - svc.service.id
+                                        } else {
+                                            selectedServiceIds + svc.service.id
+                                        }
+                                    },
+                                    label = { Text(svc.service.name) }
+                                )
+                            }
+                        }
+                    }
+                    ExportMode.SELECTED_CATEGORIES -> {
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            categories.forEach { cat ->
+                                val selected = cat.category.id in selectedCategoryIds
+                                FilterChip(
+                                    selected = selected,
+                                    onClick = {
+                                        selectedCategoryIds = if (selected) {
+                                            selectedCategoryIds - cat.category.id
+                                        } else {
+                                            selectedCategoryIds + cat.category.id
+                                        }
+                                    },
+                                    label = { Text(cat.category.name) }
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Button(
+                    onClick = {
+                        errorMessage = null
+                        onPrepareAutoLockedBackup(
+                            selectedExportMode,
+                            selectedAccountIds,
+                            selectedServiceIds,
+                            selectedCategoryIds,
+                            {
+                                confirmedKeySaved = false
+                                copiedKeyNotice = false
+                                showGeneratedKeyModal = true
+                            },
+                            { err -> errorMessage = err }
+                        )
+                    },
+                    shape = RoundedCornerShape(12.dp),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                        .testTag("export_encrypted_backup_button")
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Lock,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                        Column {
-                            Text(
-                                text = "Locked Encrypted Backup (.dao-backup)",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                            Text(
-                                text = "Includes standalone Accounts, Services, Service Account entries, encrypted Passwords, custom logos, and Recovery Code metadata.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
+                    Icon(Icons.Default.CloudUpload, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Generate Export Lock Key & Export .dao-backup")
+                }
 
-                    Text(
-                        text = "Export Scope",
-                        style = MaterialTheme.typography.labelLarge
-                    )
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        ExportMode.entries.forEach { mode ->
-                            FilterChip(
-                                selected = selectedExportMode == mode,
-                                onClick = { selectedExportMode = mode },
-                                label = { Text(mode.displayLabel) },
-                                modifier = Modifier.testTag("export_mode_${mode.name}")
-                            )
-                        }
-                    }
-
-                    when (selectedExportMode) {
-                        ExportMode.FULL -> Unit
-                        ExportMode.SELECTED_ACCOUNTS -> {
-                            FlowRow(
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                accounts.forEach { acc ->
-                                    val selected = acc.account.id in selectedAccountIds
-                                    FilterChip(
-                                        selected = selected,
-                                        onClick = {
-                                            selectedAccountIds = if (selected) {
-                                                selectedAccountIds - acc.account.id
-                                            } else {
-                                                selectedAccountIds + acc.account.id
-                                            }
-                                        },
-                                        label = { Text(acc.account.displayName) }
-                                    )
-                                }
+                OutlinedButton(
+                    onClick = {
+                        errorMessage = null
+                        if (encryptedVaultBackups.isNotEmpty()) {
+                            showImportSourceModal = true
+                        } else {
+                            runCatching {
+                                openBackupDocumentLauncher.launch(arrayOf("*/*"))
+                            }.onFailure {
+                                showImportSourceModal = true
                             }
                         }
-                        ExportMode.SELECTED_SERVICES -> {
-                            FlowRow(
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                services.forEach { svc ->
-                                    val selected = svc.service.id in selectedServiceIds
-                                    FilterChip(
-                                        selected = selected,
-                                        onClick = {
-                                            selectedServiceIds = if (selected) {
-                                                selectedServiceIds - svc.service.id
-                                            } else {
-                                                selectedServiceIds + svc.service.id
-                                            }
-                                        },
-                                        label = { Text(svc.service.name) }
-                                    )
-                                }
-                            }
-                        }
-                        ExportMode.SELECTED_CATEGORIES -> {
-                            FlowRow(
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                categories.forEach { cat ->
-                                    val selected = cat.category.id in selectedCategoryIds
-                                    FilterChip(
-                                        selected = selected,
-                                        onClick = {
-                                            selectedCategoryIds = if (selected) {
-                                                selectedCategoryIds - cat.category.id
-                                            } else {
-                                                selectedCategoryIds + cat.category.id
-                                            }
-                                        },
-                                        label = { Text(cat.category.name) }
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    Button(
-                        onClick = {
-                            errorMessage = null
-                            onPrepareAutoLockedBackup(
-                                selectedExportMode,
-                                selectedAccountIds,
-                                selectedServiceIds,
-                                selectedCategoryIds,
-                                {
-                                    confirmedKeySaved = false
-                                    copiedKeyNotice = false
-                                    showGeneratedKeyModal = true
-                                },
-                                { err -> errorMessage = err }
-                            )
-                        },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("export_encrypted_backup_button")
-                    ) {
-                        Icon(Icons.Default.CloudUpload, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text("Generate Export Lock Key & Export .dao-backup")
-                    }
-
-                    OutlinedButton(
-                        onClick = {
-                            openBackupDocumentLauncher.launch(arrayOf("*/*"))
-                        },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("import_encrypted_backup_button")
-                    ) {
-                        Icon(Icons.Default.CloudDownload, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text("Import / Restore .dao-backup")
-                    }
+                    },
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("import_encrypted_backup_button")
+                ) {
+                    Icon(Icons.Default.CloudDownload, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Import / Restore .dao-backup")
                 }
             }
         }
@@ -360,50 +364,120 @@ fun BackupScreen(
             }
         }
 
-        // 3. Plaintext CSV Audit Export Card
+        // 3. Built-In Backup Vault & Downloads List
         item {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))
+            FormSectionCard(
+                title = "Built-In Backup Vault & Downloads (${savedVaultBackups.size})",
+                subtitle = "Saved .dao-backup and .csv files stored in Downloads and your in-app Backup Vault.",
+                icon = Icons.Default.SaveAlt
             ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Description,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.secondary
-                        )
-                        Column {
-                            Text(
-                                text = "Plaintext CSV Inventory Export",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                            Text(
-                                text = "Exports non-sensitive account & service inventory to a spreadsheet-friendly CSV file. Saved passwords are never included in CSV exports.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+                if (savedVaultBackups.isEmpty()) {
+                    Text(
+                        text = "No saved backup files in your Built-In Backup Vault yet. Export a .dao-backup or CSV above to save directly to Downloads and this vault list.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        savedVaultBackups.forEach { entry ->
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("vault_backup_item_${entry.fileName}")
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Column(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .padding(end = 8.dp),
+                                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                                    ) {
+                                        Text(
+                                            text = entry.fileName,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.SemiBold,
+                                            fontFamily = JetBrainsMonoFontFamily,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        val sizeKb = (entry.byteSize / 1024L).coerceAtLeast(1L)
+                                        Text(
+                                            text = "${dateFormatter.format(Date(entry.lastModifiedMillis))} • $sizeKb KB • Saved in Downloads & Vault",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        if (entry.isEncryptedBackup) {
+                                            FilledTonalButton(
+                                                onClick = {
+                                                    pendingImportUri = null
+                                                    pendingImportVaultEntry = entry
+                                                    importLockKeyInput = ""
+                                                    errorMessage = null
+                                                },
+                                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                                shape = RoundedCornerShape(8.dp),
+                                                modifier = Modifier.testTag("import_vault_backup_${entry.fileName}")
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.LockOpen,
+                                                    contentDescription = null,
+                                                    modifier = Modifier.size(14.dp)
+                                                )
+                                                Spacer(Modifier.width(4.dp))
+                                                Text("Import", style = MaterialTheme.typography.labelMedium)
+                                            }
+                                        }
+                                        IconButton(
+                                            onClick = { onDeleteVaultBackupFile(entry.absolutePath) }
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Delete,
+                                                contentDescription = "Delete ${entry.fileName} from vault",
+                                                tint = MaterialTheme.colorScheme.error,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
+                }
+            }
+        }
 
-                    OutlinedButton(
-                        onClick = { showPlainCsvConfirm = true },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("export_plain_csv_button")
-                    ) {
-                        Text("Export Inventory CSV (No Passwords)")
-                    }
+        // 4. Plaintext CSV Audit Export Card
+        item {
+            FormSectionCard(
+                title = "Plaintext CSV Inventory Export (No Passwords)",
+                subtitle = "Exports non-sensitive account & service inventory to a spreadsheet-friendly CSV file in Downloads & Backup Vault.",
+                icon = Icons.Default.Description
+            ) {
+                OutlinedButton(
+                    onClick = { showPlainCsvConfirm = true },
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("export_plain_csv_button")
+                ) {
+                    Icon(Icons.Default.SaveAlt, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Export Inventory CSV (No Passwords)")
                 }
             }
         }
@@ -411,6 +485,9 @@ fun BackupScreen(
 
     if (showGeneratedKeyModal && !generatedExportLockKey.isNullOrBlank()) {
         val lockKey = generatedExportLockKey
+        val fileTimestamp = remember { SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) }
+        val targetFileName = "digital_accounts_$fileTimestamp.dao-backup"
+
         AlertDialog(
             onDismissRequest = {
                 showGeneratedKeyModal = false
@@ -487,17 +564,40 @@ fun BackupScreen(
                             style = MaterialTheme.typography.bodySmall
                         )
                     }
+
+                    TextButton(
+                        onClick = {
+                            showGeneratedKeyModal = false
+                            runCatching {
+                                createEncryptedBackupLauncher.launch(targetFileName)
+                            }.onFailure {
+                                onSavePendingBackupDirectly(targetFileName) { err ->
+                                    errorMessage = err
+                                }
+                            }
+                        },
+                        enabled = confirmedKeySaved,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Or Choose Custom Folder via System Picker...")
+                    }
                 }
             },
             confirmButton = {
                 Button(
                     onClick = {
                         showGeneratedKeyModal = false
-                        createEncryptedBackupLauncher.launch("digital_accounts_$timestamp.dao-backup")
+                        onSavePendingBackupDirectly(targetFileName) { err ->
+                            errorMessage = err
+                        }
                     },
                     enabled = confirmedKeySaved,
                     modifier = Modifier.testTag("save_encrypted_backup_file_button")
                 ) {
+                    Icon(Icons.Default.SaveAlt, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
                     Text("Save Locked .dao-backup File")
                 }
             },
@@ -515,6 +615,9 @@ fun BackupScreen(
     }
 
     if (showPlainCsvConfirm) {
+        val csvTimestamp = remember { SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) }
+        val csvFileName = "digital_accounts_$csvTimestamp.csv"
+
         AlertDialog(
             onDismissRequest = { showPlainCsvConfirm = false },
             icon = {
@@ -526,21 +629,45 @@ fun BackupScreen(
             },
             title = { Text("Export Unencrypted CSV?") },
             text = {
-                Text(
-                    "Plaintext CSV files are readable by any spreadsheet app. Saved passwords are automatically excluded from CSV exports. Continue?"
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        "Plaintext CSV files are readable by any spreadsheet app and are saved directly to Downloads & your Built-In Backup Vault. Saved passwords are automatically excluded from CSV exports."
+                    )
+                    TextButton(
+                        onClick = {
+                            showPlainCsvConfirm = false
+                            onPreparePlaintextCsv(
+                                {
+                                    runCatching {
+                                        createPlainCsvLauncher.launch(csvFileName)
+                                    }.onFailure {
+                                        onSavePlaintextCsvDirectly(csvFileName) { err ->
+                                            errorMessage = err
+                                        }
+                                    }
+                                },
+                                { err -> errorMessage = err }
+                            )
+                        }
+                    ) {
+                        Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Or Choose Custom Folder via System Picker...")
+                    }
+                }
             },
             confirmButton = {
                 Button(
                     onClick = {
                         showPlainCsvConfirm = false
-                        onPreparePlaintextCsv(
-                            { createPlainCsvLauncher.launch("digital_accounts_$timestamp.csv") },
-                            { err -> errorMessage = err }
-                        )
+                        onSavePlaintextCsvDirectly(csvFileName) { err ->
+                            errorMessage = err
+                        }
                     },
                     modifier = Modifier.testTag("confirm_plain_csv_export_button")
                 ) {
+                    Icon(Icons.Default.SaveAlt, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
                     Text("Export CSV")
                 }
             },
@@ -552,13 +679,94 @@ fun BackupScreen(
         )
     }
 
-    val importUri = pendingImportUri
-    if (importUri != null) {
+    if (showImportSourceModal) {
         AlertDialog(
-            onDismissRequest = { pendingImportUri = null },
+            onDismissRequest = { showImportSourceModal = false },
+            title = { Text("Select .dao-backup to Import") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    if (encryptedVaultBackups.isEmpty()) {
+                        Text(
+                            text = "No .dao-backup files are stored in the Built-In Backup Vault yet. Export a backup first or browse an external file.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    } else {
+                        Text(
+                            text = "Choose a backup from your Built-In Backup Vault (Downloads):",
+                            style = MaterialTheme.typography.labelLarge
+                        )
+                        encryptedVaultBackups.take(5).forEach { entry ->
+                            OutlinedButton(
+                                onClick = {
+                                    showImportSourceModal = false
+                                    pendingImportUri = null
+                                    pendingImportVaultEntry = entry
+                                    importLockKeyInput = ""
+                                    errorMessage = null
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Icon(Icons.Default.Lock, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    text = entry.fileName,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+
+                    HorizontalDivider()
+
+                    OutlinedButton(
+                        onClick = {
+                            showImportSourceModal = false
+                            runCatching {
+                                openBackupDocumentLauncher.launch(arrayOf("*/*"))
+                            }.onFailure {
+                                errorMessage =
+                                    "System file picker is unavailable on this device. Select a backup from the Built-In Backup Vault list."
+                            }
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("browse_external_backup_button")
+                    ) {
+                        Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Browse Device Storage...")
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showImportSourceModal = false }) {
+                    Text("Close")
+                }
+            }
+        )
+    }
+
+    val importUri = pendingImportUri
+    val importVaultEntry = pendingImportVaultEntry
+    if (importUri != null || importVaultEntry != null) {
+        AlertDialog(
+            onDismissRequest = {
+                pendingImportUri = null
+                pendingImportVaultEntry = null
+            },
             title = { Text("Enter Export Lock Key to Import") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    if (importVaultEntry != null) {
+                        Text(
+                            text = "Selected Backup: ${importVaultEntry.fileName}",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontFamily = JetBrainsMonoFontFamily,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
                     Text(
                         text = "Enter or paste the Export Lock Key (e.g., DAO-XXXX-XXXX-XXXX-XXXX) that the application generated when this .dao-backup file was created.",
                         style = MaterialTheme.typography.bodySmall
@@ -578,11 +786,19 @@ fun BackupScreen(
             confirmButton = {
                 Button(
                     onClick = {
-                        val targetUri = importUri
                         val key = importLockKeyInput.trim()
+                        val targetVault = importVaultEntry
+                        val targetUri = importUri
+                        pendingImportVaultEntry = null
                         pendingImportUri = null
-                        onStageBackupFromUri(targetUri, key) { err ->
-                            errorMessage = err
+                        if (targetVault != null) {
+                            onStageBackupFromVaultFile(targetVault.absolutePath, key) { err ->
+                                errorMessage = err
+                            }
+                        } else if (targetUri != null) {
+                            onStageBackupFromUri(targetUri, key) { err ->
+                                errorMessage = err
+                            }
                         }
                     },
                     enabled = importLockKeyInput.trim().isNotEmpty(),
@@ -592,7 +808,12 @@ fun BackupScreen(
                 }
             },
             dismissButton = {
-                OutlinedButton(onClick = { pendingImportUri = null }) {
+                OutlinedButton(
+                    onClick = {
+                        pendingImportUri = null
+                        pendingImportVaultEntry = null
+                    }
+                ) {
                     Text("Cancel")
                 }
             }
@@ -613,6 +834,7 @@ private fun StagedBackupPreviewCard(
         modifier = Modifier
             .fillMaxWidth()
             .testTag("staged_backup_preview_card"),
+        shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.35f)
         ),

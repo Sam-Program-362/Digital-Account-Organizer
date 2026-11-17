@@ -439,6 +439,10 @@ class OrganizerRepository(
 
     /**
      * Saves a standalone core Account (independent of any Service) with its own encrypted password and notes.
+     * When editing an existing account ([existingId] != null):
+     * - If [clearSavedPassword] is true, the stored password is removed.
+     * - If [password] is non-blank, it is encrypted and replaces the stored password.
+     * - If [password] is null or blank and [clearSavedPassword] is false, the existing encrypted password is preserved.
      */
     suspend fun saveAccount(
         existingId: String? = null,
@@ -446,6 +450,7 @@ class OrganizerRepository(
         email: String?,
         username: String?,
         password: String? = null,
+        clearSavedPassword: Boolean = false,
         categoryId: String?,
         purpose: String?,
         recoveryEmailReference: String?,
@@ -467,7 +472,12 @@ class OrganizerRepository(
 
         val now = clockMillis()
         val existing = existingId?.let { db.accountDao().getAccountById(it) }
-        val encryptedPwd = encryptSecret(password?.trim()?.takeIf { it.isNotEmpty() })
+        val trimmedNewPassword = password?.trim()?.takeIf { it.isNotEmpty() }
+        val encryptedPwd = when {
+            clearSavedPassword -> null
+            trimmedNewPassword != null -> encryptSecret(trimmedNewPassword)
+            else -> existing?.encryptedPassword
+        }
         val entity = AccountEntity(
             id = existing?.id ?: UUID.randomUUID().toString(),
             displayName = effectiveLabel,
@@ -515,6 +525,8 @@ class OrganizerRepository(
      * Saves a Service-specific Account entry under a [serviceId].
      * Supports linking an existing standalone [AccountEntity] ([linkedAccountId]) OR entering
      * a custom unlinked email/username/handle, plus an optional encrypted password and notes.
+     * When editing an existing entry ([existingId] != null), leaving [password] blank preserves
+     * the existing encrypted password unless [clearSavedPassword] is true.
      */
     suspend fun saveServiceAccount(
         existingId: String? = null,
@@ -524,6 +536,7 @@ class OrganizerRepository(
         email: String?,
         username: String?,
         password: String?,
+        clearSavedPassword: Boolean = false,
         categoryId: String?,
         purpose: String?,
         recoveryEmailReference: String?,
@@ -553,7 +566,12 @@ class OrganizerRepository(
 
         val now = clockMillis()
         val existing = existingId?.let { db.serviceAccountDao().getServiceAccountById(it) }
-        val encryptedPwd = encryptSecret(password?.trim()?.takeIf { it.isNotEmpty() })
+        val trimmedNewPassword = password?.trim()?.takeIf { it.isNotEmpty() }
+        val encryptedPwd = when {
+            clearSavedPassword -> null
+            trimmedNewPassword != null -> encryptSecret(trimmedNewPassword)
+            else -> existing?.encryptedPassword
+        }
         val entity = ServiceAccountEntity(
             id = existing?.id ?: UUID.randomUUID().toString(),
             serviceId = serviceId,

@@ -4,10 +4,11 @@ import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import com.example.core.database.EncryptedDatabaseFactory
 import com.example.core.database.OrganizerRepository
-import com.example.core. database.SaveAccountOutcome
+import com.example.core.database.SaveAccountOutcome
 import com.example.core.database.SaveCategoryOutcome
 import com.example.core.database.SaveServiceAccountOutcome
 import com.example.core.database.SaveServiceOutcome
+import com.example.core.files.BackupVaultStorage
 import com.example.core.files.ServiceAssetStorage
 import com.example.core.security.AndroidKeystoreKeyWrapper
 import com.example.core.security.AutoLockTimeout
@@ -23,9 +24,11 @@ import com.example.feature.backup.ExportSelection
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -189,6 +192,90 @@ class ExampleRobolectricTest {
             "BotServicePassword#42",
             repository.decryptSecret(botEntry.serviceAccount.encryptedPassword)
         )
+    }
+
+    @Test
+    fun editingAccountAndServiceAccountPreservesPasswordWhenBlankAndClearsWhenRequested() = runBlocking {
+        val created = repository.saveAccount(
+            existingId = null,
+            displayName = "Primary Vault Mail",
+            email = "vault@example.com",
+            username = "vault_user",
+            password = "InitialSecretPassword!1",
+            categoryId = null,
+            purpose = "Identity",
+            recoveryEmailReference = null,
+            recoveryPhoneReference = null,
+            notes = "Keep safe",
+            status = AccountStatus.ACTIVE
+        ) as SaveAccountOutcome.Saved
+
+        // Edit display name while leaving password blank (editor does not pre-fill password)
+        val editedKeepPassword = repository.saveAccount(
+            existingId = created.account.id,
+            displayName = "Updated Vault Mail",
+            email = "vault@example.com",
+            username = "vault_user",
+            password = "",
+            clearSavedPassword = false,
+            categoryId = null,
+            purpose = "Updated Identity",
+            recoveryEmailReference = null,
+            recoveryPhoneReference = null,
+            notes = "Keep safe",
+            status = AccountStatus.ACTIVE
+        ) as SaveAccountOutcome.Saved
+
+        assertTrue(editedKeepPassword.account.hasPassword)
+        assertEquals(
+            "InitialSecretPassword!1",
+            repository.decryptSecret(editedKeepPassword.account.encryptedPassword)
+        )
+
+        // Edit with clearSavedPassword = true -> removes saved encrypted password
+        val editedCleared = repository.saveAccount(
+            existingId = created.account.id,
+            displayName = "Updated Vault Mail",
+            email = "vault@example.com",
+            username = "vault_user",
+            password = "",
+            clearSavedPassword = true,
+            categoryId = null,
+            purpose = "Updated Identity",
+            recoveryEmailReference = null,
+            recoveryPhoneReference = null,
+            notes = "Keep safe",
+            status = AccountStatus.ACTIVE
+        ) as SaveAccountOutcome.Saved
+
+        assertFalse(editedCleared.account.hasPassword)
+        assertNull(editedCleared.account.encryptedPassword)
+    }
+
+    @Test
+    fun backupVaultStorageSavesEncryptedBackupAndCsvDirectlyWithoutFilePickerCrash() = runBlocking {
+        val vaultStorage = BackupVaultStorage(context)
+        val sampleEncryptedBytes = "encrypted-dao-backup-payload".encodeToByteArray()
+
+        val savedBackup = vaultStorage.saveBackupBytesToDownloadsAndVault(
+            fileName = "test-vault.dao-backup",
+            bytes = sampleEncryptedBytes
+        )
+        assertTrue(savedBackup.fileName.endsWith(".dao-backup"))
+
+        val listed = vaultStorage.listSavedBackups()
+        assertTrue(listed.any { it.fileName == savedBackup.fileName })
+
+        val readBack = vaultStorage.readVaultFileBytes(savedBackup.vaultEntry.absolutePath)
+        assertArrayEquals(sampleEncryptedBytes, readBack)
+
+        val savedCsv = vaultStorage.saveCsvToDownloadsAndVault(
+            fileName = "test-export.csv",
+            csvContent = "record_type,name\nACCOUNT,example@gmail.com"
+        )
+        assertTrue(savedCsv.fileName.endsWith(".csv"))
+        assertTrue(vaultStorage.deleteVaultFile(savedBackup.vaultEntry.absolutePath))
+        assertTrue(vaultStorage.deleteVaultFile(savedCsv.vaultEntry.absolutePath))
     }
 
     @Test

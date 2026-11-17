@@ -1,15 +1,18 @@
 package com.example
 
-import android.net.Uri
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
-import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
@@ -49,6 +52,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
@@ -57,8 +61,6 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.app.DigitalAccountOrganizerApp
 import com.example.app.OrganizerViewModel
 import com.example.core.security.LockState
-import com.example.domain.model.AccountWithDetails
-import com.example.domain.model.ServiceWithCount
 import com.example.feature.accounts.AccountEditorDialog
 import com.example.feature.accounts.AccountsScreen
 import com.example.feature.backup.BackupScreen
@@ -147,6 +149,7 @@ private fun OrganizerRootContent(
 
     val services by viewModel.services.collectAsStateWithLifecycle()
     val categories by viewModel.categories.collectAsStateWithLifecycle()
+    val allAccounts by viewModel.allAccounts.collectAsStateWithLifecycle()
     val filteredAccounts by viewModel.filteredAccounts.collectAsStateWithLifecycle()
     val allServiceAccounts by viewModel.allServiceAccounts.collectAsStateWithLifecycle()
     val dashboardSummary by viewModel.dashboardSummary.collectAsStateWithLifecycle()
@@ -158,19 +161,30 @@ private fun OrganizerRootContent(
     val unlockError by viewModel.unlockError.collectAsStateWithLifecycle()
     val oneTimeRecoveryCode by viewModel.oneTimeRecoveryCode.collectAsStateWithLifecycle()
     val duplicateServicePrompt by viewModel.duplicateServicePrompt.collectAsStateWithLifecycle()
+    val savedVaultBackups by viewModel.savedVaultBackups.collectAsStateWithLifecycle()
     val stagedBackup by viewModel.stagedBackup.collectAsStateWithLifecycle()
     val conflictResolutions by viewModel.conflictResolutions.collectAsStateWithLifecycle()
     val generatedExportLockKey by viewModel.generatedExportLockKey.collectAsStateWithLifecycle()
 
-    var currentDestination by rememberSaveable { mutableStateOf(OrganizerDestination.DASHBOARD) }
+    // Store destination as a primitive String in rememberSaveable to prevent Bundle serialization issues
+    var currentDestinationName by rememberSaveable { mutableStateOf(OrganizerDestination.DASHBOARD.name) }
+    val currentDestination = remember(currentDestinationName) {
+        OrganizerDestination.entries.firstOrNull { it.name == currentDestinationName }
+            ?: OrganizerDestination.DASHBOARD
+    }
     var selectedServiceIdForDetail by rememberSaveable { mutableStateOf<String?>(null) }
 
     var showAccountEditor by rememberSaveable { mutableStateOf(false) }
-    var editingAccount by remember { mutableStateOf<AccountWithDetails?>(null) }
-    var initialAccountPassword by remember { mutableStateOf("") }
+    var editingAccountId by rememberSaveable { mutableStateOf<String?>(null) }
+    val editingAccount = remember(allAccounts, editingAccountId) {
+        allAccounts.firstOrNull { it.account.id == editingAccountId }
+    }
 
     var showServiceEditor by rememberSaveable { mutableStateOf(false) }
-    var editingService by remember { mutableStateOf<ServiceWithCount?>(null) }
+    var editingServiceId by rememberSaveable { mutableStateOf<String?>(null) }
+    val editingService = remember(services, editingServiceId) {
+        services.firstOrNull { it.service.id == editingServiceId }
+    }
 
     var showVaultVerificationDialog by remember { mutableStateOf(false) }
     var pendingVaultVerifiedAction by remember { mutableStateOf<(() -> Unit)?>(null) }
@@ -189,17 +203,9 @@ private fun OrganizerRootContent(
             BiometricManager.BIOMETRIC_SUCCESS
     }
 
-    val saveRecoveryCodeFileLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.CreateDocument("text/plain")
-    ) { uri: Uri? ->
-        if (uri != null) {
-            viewModel.writeOneTimeRecoveryCodeToUri(activity, uri)
-        }
-    }
-
     val triggerOneTimeRecoveryCodeDownload: () -> Unit = {
-        val dateStamp = SimpleDateFormat("yyyyMMdd", Locale.US).format(Date())
-        saveRecoveryCodeFileLauncher.launch("dao_recovery_code_$dateStamp.txt")
+        val dateStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        viewModel.saveOneTimeRecoveryCodeDirectly("dao_recovery_code_$dateStamp.txt")
     }
 
     val requestVaultVerifiedAction: (onVerified: () -> Unit) -> Unit = { onVerified ->
@@ -223,7 +229,7 @@ private fun OrganizerRootContent(
                     launchDeviceOrBiometricPrompt(
                         activity = activity,
                         title = "Verify Password Manager",
-                        subtitle = "Verify your identity to view, copy, or edit saved passwords and notes",
+                        subtitle = "Verify your identity to view or copy saved passwords and notes",
                         onAuthenticated = {
                             viewModel.recordVaultSessionVerified()
                             onVerified()
@@ -233,7 +239,6 @@ private fun OrganizerRootContent(
                     pendingVaultVerifiedAction = onVerified
                     showVaultVerificationDialog = true
                 } else {
-                    // Device has no screen lock configured and no Master Password is enabled
                     viewModel.recordVaultSessionVerified()
                     onVerified()
                 }
@@ -305,9 +310,9 @@ private fun OrganizerRootContent(
         }
 
         is LockState.Unlocked -> {
-            if (currentDestination != OrganizerDestination.DASHBOARD) {
+            if (!showAccountEditor && !showServiceEditor && currentDestination != OrganizerDestination.DASHBOARD) {
                 BackHandler {
-                    currentDestination = OrganizerDestination.DASHBOARD
+                    currentDestinationName = OrganizerDestination.DASHBOARD.name
                 }
             }
 
@@ -316,33 +321,40 @@ private fun OrganizerRootContent(
 
                 Scaffold(
                     topBar = {
-                        TopAppBar(
-                            title = { Text("Digital Account Organizer") },
-                            colors = TopAppBarDefaults.topAppBarColors(
-                                containerColor = MaterialTheme.colorScheme.surface
-                            ),
-                            actions = {
-                                if (lockState.isAppLockEnabled) {
-                                    IconButton(
-                                        onClick = { viewModel.lockOrganizerNow() },
-                                        modifier = Modifier.testTag("top_bar_lock_button")
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.Lock,
-                                            contentDescription = "Lock Organizer Now"
-                                        )
+                        if (!showAccountEditor && !showServiceEditor) {
+                            TopAppBar(
+                                title = {
+                                    Text(
+                                        text = "Digital Account Organizer",
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                },
+                                colors = TopAppBarDefaults.topAppBarColors(
+                                    containerColor = MaterialTheme.colorScheme.surface
+                                ),
+                                actions = {
+                                    if (lockState.isAppLockEnabled) {
+                                        IconButton(
+                                            onClick = { viewModel.lockOrganizerNow() },
+                                            modifier = Modifier.testTag("top_bar_lock_button")
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Lock,
+                                                contentDescription = "Lock Organizer Now"
+                                            )
+                                        }
                                     }
                                 }
-                            }
-                        )
+                            )
+                        }
                     },
                     bottomBar = {
-                        if (!useNavRail) {
+                        if (!useNavRail && !showAccountEditor && !showServiceEditor) {
                             NavigationBar {
                                 OrganizerDestination.entries.forEach { dest ->
                                     NavigationBarItem(
                                         selected = currentDestination == dest,
-                                        onClick = { currentDestination = dest },
+                                        onClick = { currentDestinationName = dest.name },
                                         icon = { Icon(dest.icon, contentDescription = dest.label) },
                                         label = { Text(dest.label, maxLines = 1) },
                                         modifier = Modifier.testTag(dest.testTag)
@@ -359,12 +371,12 @@ private fun OrganizerRootContent(
                             .fillMaxSize()
                             .padding(innerPadding)
                     ) {
-                        if (useNavRail) {
+                        if (useNavRail && !showAccountEditor && !showServiceEditor) {
                             NavigationRail {
                                 OrganizerDestination.entries.forEach { dest ->
                                     NavigationRailItem(
                                         selected = currentDestination == dest,
-                                        onClick = { currentDestination = dest },
+                                        onClick = { currentDestinationName = dest.name },
                                         icon = { Icon(dest.icon, contentDescription = dest.label) },
                                         label = { Text(dest.label) },
                                         modifier = Modifier.testTag(dest.testTag)
@@ -374,357 +386,396 @@ private fun OrganizerRootContent(
                         }
 
                         Box(modifier = Modifier.weight(1f)) {
-                            when (currentDestination) {
-                                OrganizerDestination.DASHBOARD -> {
-                                    DashboardScreen(
-                                        summary = dashboardSummary,
-                                        isAppLockEnabled = lockState.isAppLockEnabled,
-                                        showInitialLockSuggestion = !lockState.hasDismissedInitialLockSuggestion && !lockState.isAppLockEnabled,
-                                        onKeepDeviceVaultLock = {
-                                            viewModel.dismissInitialLockSuggestion(disableAllLocks = false)
-                                        },
-                                        onOpenSecuritySettings = {
-                                            viewModel.dismissInitialLockSuggestion(disableAllLocks = false)
-                                            currentDestination = OrganizerDestination.SETTINGS
-                                        },
-                                        onSkipAllLocks = {
-                                            viewModel.dismissInitialLockSuggestion(disableAllLocks = true)
-                                        },
-                                        onCreateServiceClick = {
-                                            editingService = null
-                                            showServiceEditor = true
-                                        },
-                                        onAddAccountClick = {
-                                            editingAccount = null
-                                            initialAccountPassword = ""
-                                            showAccountEditor = true
-                                        },
-                                        onOpenServiceDetail = { serviceId ->
-                                            selectedServiceIdForDetail = serviceId
-                                            currentDestination = OrganizerDestination.SERVICES
-                                        },
-                                        onOpenAccountsForCategory = { categoryId ->
-                                            viewModel.clearAllFilters()
-                                            viewModel.selectCategoryFilter(categoryId)
-                                            currentDestination = OrganizerDestination.ACCOUNTS
-                                        },
-                                        onOpenAllAccounts = {
-                                            currentDestination = OrganizerDestination.ACCOUNTS
-                                        },
-                                        onOpenBackup = {
-                                            currentDestination = OrganizerDestination.BACKUP
-                                        },
-                                        onLockNowClick = { viewModel.lockOrganizerNow() }
-                                    )
-                                }
+                            val activeOverlayPage = when {
+                                showAccountEditor -> "ACCOUNT_EDITOR"
+                                showServiceEditor -> "SERVICE_EDITOR"
+                                else -> "MAIN_${currentDestination.name}"
+                            }
 
-                                OrganizerDestination.ACCOUNTS -> {
-                                    AccountsScreen(
-                                        accounts = filteredAccounts,
-                                        categories = categories,
-                                        filterState = filterState,
-                                        onSearchQueryChange = { viewModel.updateSearchQuery(it) },
-                                        onSelectCategoryFilter = { viewModel.selectCategoryFilter(it) },
-                                        onSelectStatusFilter = { viewModel.selectStatusFilter(it) },
-                                        onToggleShowArchived = { viewModel.setShowArchived(it) },
-                                        onSelectSortOrder = { viewModel.setSortOrder(it) },
-                                        onClearFilters = { viewModel.clearAllFilters() },
-                                        onAddAccountClick = {
-                                            editingAccount = null
-                                            initialAccountPassword = ""
-                                            showAccountEditor = true
-                                        },
-                                        onEditAccountClick = { item ->
-                                            editingAccount = item
-                                            initialAccountPassword =
-                                                viewModel.decryptSecretField(item.account.encryptedPassword).orEmpty()
-                                            showAccountEditor = true
-                                        },
-                                        onToggleArchiveAccount = { id, archived ->
-                                            viewModel.setAccountArchived(id, archived)
-                                        },
-                                        onDeleteAccountPermanently = { id ->
-                                            viewModel.deleteAccountPermanently(id)
-                                        },
-                                        onDecryptSecret = { viewModel.decryptSecretField(it) },
-                                        onRequestVerifiedAction = requestVaultVerifiedAction
-                                    )
-                                }
-
-                                OrganizerDestination.SERVICES -> {
-                                    ServicesScreen(
-                                        services = services,
-                                        serviceAccounts = allServiceAccounts,
-                                        standaloneAccounts = filteredAccounts,
-                                        categories = categories,
-                                        selectedServiceIdForDetail = selectedServiceIdForDetail,
-                                        duplicatePrompt = duplicateServicePrompt,
-                                        onSelectServiceForDetail = { selectedServiceIdForDetail = it },
-                                        onCreateServiceClick = {
-                                            editingService = null
-                                            showServiceEditor = true
-                                        },
-                                        onEditServiceClick = { svc ->
-                                            editingService = svc
-                                            showServiceEditor = true
-                                        },
-                                        onToggleArchiveService = { id, archived ->
-                                            viewModel.setServiceArchived(id, archived)
-                                        },
-                                        onResolveDeleteService = { serviceId, resolution, reassignId, onCompleted, onError ->
-                                            viewModel.deleteOrResolveService(
-                                                serviceId = serviceId,
-                                                resolution = resolution,
-                                                reassignTargetServiceId = reassignId,
-                                                onCompleted = onCompleted,
-                                                onError = onError
-                                            )
-                                        },
-                                        onConfirmDuplicateServiceVariation = {
-                                            val dup = duplicateServicePrompt
-                                            if (dup != null) {
-                                                viewModel.saveService(
-                                                    existingId = dup.existingId,
-                                                    name = dup.pendingName,
-                                                    websiteUrl = dup.pendingWebsiteUrl,
-                                                    description = dup.pendingDescription,
-                                                    iconAssetId = dup.pendingIconAssetId,
-                                                    allowDuplicateVariation = true,
-                                                    onSaved = { showServiceEditor = false },
-                                                    onError = {}
+                            AnimatedContent(
+                                targetState = activeOverlayPage,
+                                transitionSpec = {
+                                    if (targetState == "ACCOUNT_EDITOR" || targetState == "SERVICE_EDITOR") {
+                                        (slideInHorizontally { it / 4 } + fadeIn()) togetherWith
+                                            (slideOutHorizontally { -it / 4 } + fadeOut())
+                                    } else if (initialState == "ACCOUNT_EDITOR" || initialState == "SERVICE_EDITOR") {
+                                        (slideInHorizontally { -it / 4 } + fadeIn()) togetherWith
+                                            (slideOutHorizontally { it / 4 } + fadeOut())
+                                    } else {
+                                        fadeIn() togetherWith fadeOut()
+                                    }
+                                },
+                                label = "root_page_transition"
+                            ) { pageState ->
+                                when (pageState) {
+                                    "ACCOUNT_EDITOR" -> {
+                                        AccountEditorDialog(
+                                            initialAccount = editingAccount,
+                                            categories = categories,
+                                            onDismiss = {
+                                                showAccountEditor = false
+                                                editingAccountId = null
+                                            },
+                                            onSave = { existingId, displayName, email, username, password, clearSavedPassword, categoryId, purpose, recEmail, recPhone, notes, status, onError ->
+                                                viewModel.saveAccount(
+                                                    existingId = existingId,
+                                                    displayName = displayName,
+                                                    email = email,
+                                                    username = username,
+                                                    password = password,
+                                                    clearSavedPassword = clearSavedPassword,
+                                                    categoryId = categoryId,
+                                                    purpose = purpose,
+                                                    recoveryEmailReference = recEmail,
+                                                    recoveryPhoneReference = recPhone,
+                                                    notes = notes,
+                                                    status = status,
+                                                    onSaved = {
+                                                        showAccountEditor = false
+                                                        editingAccountId = null
+                                                    },
+                                                    onError = onError
                                                 )
                                             }
-                                        },
-                                        onDismissDuplicatePrompt = {
-                                            viewModel.dismissDuplicateServicePrompt()
-                                        },
-                                        onDecryptSecret = { viewModel.decryptSecretField(it) },
-                                        onRequestVerifiedAction = requestVaultVerifiedAction,
-                                        onSaveServiceAccount = { existingId, serviceId, linkedAccId, displayName, email, username, password, categoryId, purpose, recEmail, recPhone, webUrl, notes, status, onSaved, onError ->
-                                            viewModel.saveServiceAccount(
-                                                existingId = existingId,
-                                                serviceId = serviceId,
-                                                linkedAccountId = linkedAccId,
-                                                displayName = displayName,
-                                                email = email,
-                                                username = username,
-                                                password = password,
-                                                categoryId = categoryId,
-                                                purpose = purpose,
-                                                recoveryEmailReference = recEmail,
-                                                recoveryPhoneReference = recPhone,
-                                                websiteUrl = webUrl,
-                                                notes = notes,
-                                                status = status,
-                                                onSaved = onSaved,
-                                                onError = onError
-                                            )
-                                        },
-                                        onToggleArchiveServiceAccount = { id, archived ->
-                                            viewModel.setServiceAccountArchived(id, archived)
-                                        },
-                                        onDeleteServiceAccountPermanently = { id ->
-                                            viewModel.deleteServiceAccountPermanently(id)
-                                        }
-                                    )
-                                }
+                                        )
+                                    }
 
-                                OrganizerDestination.CATEGORIES -> {
-                                    CategoriesScreen(
-                                        categories = categories,
-                                        onSaveCategory = { existingId, name, description, onSaved, onError ->
-                                            viewModel.saveCategory(
-                                                existingId = existingId,
-                                                name = name,
-                                                description = description,
-                                                onSaved = onSaved,
-                                                onError = onError
-                                            )
-                                        },
-                                        onDeleteCategorySafely = { categoryId, reassignToId, onCompleted ->
-                                            viewModel.deleteCategorySafely(
-                                                categoryId = categoryId,
-                                                reassignToCategoryId = reassignToId,
-                                                onCompleted = onCompleted
-                                            )
-                                        },
-                                        onBrowseCategoryAccounts = { categoryId ->
-                                            viewModel.clearAllFilters()
-                                            viewModel.selectCategoryFilter(categoryId)
-                                            currentDestination = OrganizerDestination.ACCOUNTS
-                                        }
-                                    )
-                                }
-
-                                OrganizerDestination.BACKUP -> {
-                                    BackupScreen(
-                                        accounts = filteredAccounts,
-                                        services = services,
-                                        categories = categories,
-                                        stagedBackup = stagedBackup,
-                                        conflictResolutions = conflictResolutions,
-                                        generatedExportLockKey = generatedExportLockKey,
-                                        onPrepareAutoLockedBackup = { mode, accIds, svcIds, catIds, onKeyReady, onError ->
-                                            viewModel.prepareAutoLockedEncryptedBackup(
-                                                mode = mode,
-                                                selectedAccountIds = accIds,
-                                                selectedServiceIds = svcIds,
-                                                selectedCategoryIds = catIds,
-                                                onLockKeyGenerated = onKeyReady,
-                                                onError = onError
-                                            )
-                                        },
-                                        onClearGeneratedExportLockKey = {
-                                            viewModel.clearGeneratedExportLockKey()
-                                        },
-                                        onWritePendingBackupToUri = { uri ->
-                                            viewModel.writePendingEncryptedBackupToUri(activity, uri)
-                                        },
-                                        onPreparePlaintextCsv = { onReady, onError ->
-                                            viewModel.preparePlaintextCsvExport(onReady, onError)
-                                        },
-                                        onWritePendingCsvToUri = { uri ->
-                                            viewModel.writePendingCsvToUri(activity, uri)
-                                        },
-                                        onStageBackupFromUri = { uri, lockKey, onError ->
-                                            viewModel.stageBackupFromUri(activity, uri, lockKey, onError)
-                                        },
-                                        onUpdateConflictResolution = { incomingId, resolution ->
-                                            viewModel.updateConflictResolution(incomingId, resolution)
-                                        },
-                                        onCancelStagedBackup = { viewModel.cancelStagedBackup() },
-                                        onCommitStagedBackup = { onError ->
-                                            viewModel.commitStagedBackup(onError)
-                                        }
-                                    )
-                                }
-
-                                OrganizerDestination.SETTINGS -> {
-                                    SettingsScreen(
-                                        unlockedState = lockState,
-                                        themePreference = themePreference,
-                                        colorPalette = colorPalette,
-                                        isBiometricHardwareAvailable = isBiometricHardwareAvailable,
-                                        onSelectThemePreference = { viewModel.setThemePreference(it) },
-                                        onSelectColorPalette = { viewModel.setColorPalette(it) },
-                                        onSetPasswordManagerLockEnabled = {
-                                            viewModel.setPasswordManagerLockEnabled(it)
-                                        },
-                                        onSetUseMasterPasswordForVault = {
-                                            viewModel.setUseMasterPasswordForVault(it)
-                                        },
-                                        onEnableAppLock = { password, timeout, onError ->
-                                            viewModel.enableAppLock(password, timeout, onError)
-                                        },
-                                        onChangeMasterPassword = { currentPass, newPass, onSuccess, onError ->
-                                            viewModel.changeMasterPassword(
-                                                currentPass,
-                                                newPass,
-                                                onSuccess,
-                                                onError
-                                            )
-                                        },
-                                        onDisableAppLock = { currentPass, onSuccess, onError ->
-                                            viewModel.disableAppLock(currentPass, onSuccess, onError)
-                                        },
-                                        onUpdateAutoLockTimeout = {
-                                            viewModel.updateAutoLockTimeout(it)
-                                        },
-                                        onToggleBiometricUnlock = { enable ->
-                                            if (enable) {
-                                                viewModel.prepareBiometricEnrollmentCipher()
-                                                    .onSuccess { cipher ->
-                                                        launchCryptoBiometricPrompt(
-                                                            activity = activity,
-                                                            title = "Enable Fingerprint Verification",
-                                                            subtitle = "Verify your fingerprint to enable biometric unlock and recovery",
-                                                            cipher = cipher,
-                                                            onAuthenticated = { authCipher ->
-                                                                viewModel.completeBiometricEnrollment(authCipher)
-                                                            }
-                                                        )
-                                                    }
-                                            } else {
-                                                viewModel.disableBiometricUnlock()
+                                    "SERVICE_EDITOR" -> {
+                                        ServiceEditorDialog(
+                                            initialService = editingService,
+                                            onImportCustomLogo = { uri, onImported, onError ->
+                                                viewModel.importServiceLogo(uri, onImported, onError)
+                                            },
+                                            onFetchWebsiteLogo = { url, onFetched, onError ->
+                                                viewModel.fetchServiceLogoFromUrl(url, onFetched, onError)
+                                            },
+                                            onCancelWebsiteLogoFetch = {
+                                                viewModel.cancelServiceLogoFetch()
+                                            },
+                                            onDismiss = {
+                                                showServiceEditor = false
+                                                editingServiceId = null
+                                            },
+                                            onSave = { existingId, name, websiteUrl, description, iconAssetId, onError ->
+                                                viewModel.saveService(
+                                                    existingId = existingId,
+                                                    name = name,
+                                                    websiteUrl = websiteUrl,
+                                                    description = description,
+                                                    iconAssetId = iconAssetId,
+                                                    onSaved = {
+                                                        showServiceEditor = false
+                                                        editingServiceId = null
+                                                    },
+                                                    onError = onError
+                                                )
                                             }
-                                        },
-                                        onRequestVerifiedAction = requestVaultVerifiedAction,
-                                        onGetDecryptedRecoveryCode = {
-                                            viewModel.getDecryptedRecoveryCode()
-                                        },
-                                        onDownloadRecoveryCodeOnce = triggerOneTimeRecoveryCodeDownload,
-                                        onLockNow = { viewModel.lockOrganizerNow() }
-                                    )
+                                        )
+                                    }
+
+                                    else -> {
+                                        when (currentDestination) {
+                                            OrganizerDestination.DASHBOARD -> {
+                                                DashboardScreen(
+                                                    summary = dashboardSummary,
+                                                    isAppLockEnabled = lockState.isAppLockEnabled,
+                                                    showInitialLockSuggestion = !lockState.hasDismissedInitialLockSuggestion && !lockState.isAppLockEnabled,
+                                                    onKeepDeviceVaultLock = {
+                                                        viewModel.dismissInitialLockSuggestion(disableAllLocks = false)
+                                                    },
+                                                    onOpenSecuritySettings = {
+                                                        viewModel.dismissInitialLockSuggestion(disableAllLocks = false)
+                                                        currentDestinationName = OrganizerDestination.SETTINGS.name
+                                                    },
+                                                    onSkipAllLocks = {
+                                                        viewModel.dismissInitialLockSuggestion(disableAllLocks = true)
+                                                    },
+                                                    onCreateServiceClick = {
+                                                        editingServiceId = null
+                                                        showServiceEditor = true
+                                                    },
+                                                    onAddAccountClick = {
+                                                        editingAccountId = null
+                                                        showAccountEditor = true
+                                                    },
+                                                    onOpenServiceDetail = { serviceId ->
+                                                        selectedServiceIdForDetail = serviceId
+                                                        currentDestinationName = OrganizerDestination.SERVICES.name
+                                                    },
+                                                    onOpenAccountsForCategory = { categoryId ->
+                                                        viewModel.clearAllFilters()
+                                                        viewModel.selectCategoryFilter(categoryId)
+                                                        currentDestinationName = OrganizerDestination.ACCOUNTS.name
+                                                    },
+                                                    onOpenAllAccounts = {
+                                                        currentDestinationName = OrganizerDestination.ACCOUNTS.name
+                                                    },
+                                                    onOpenBackup = {
+                                                        currentDestinationName = OrganizerDestination.BACKUP.name
+                                                    },
+                                                    onLockNowClick = { viewModel.lockOrganizerNow() }
+                                                )
+                                            }
+
+                                            OrganizerDestination.ACCOUNTS -> {
+                                                AccountsScreen(
+                                                    accounts = filteredAccounts,
+                                                    categories = categories,
+                                                    filterState = filterState,
+                                                    onSearchQueryChange = { viewModel.updateSearchQuery(it) },
+                                                    onSelectCategoryFilter = { viewModel.selectCategoryFilter(it) },
+                                                    onSelectStatusFilter = { viewModel.selectStatusFilter(it) },
+                                                    onToggleShowArchived = { viewModel.setShowArchived(it) },
+                                                    onSelectSortOrder = { viewModel.setSortOrder(it) },
+                                                    onClearFilters = { viewModel.clearAllFilters() },
+                                                    onAddAccountClick = {
+                                                        editingAccountId = null
+                                                        showAccountEditor = true
+                                                    },
+                                                    onEditAccountClick = { item ->
+                                                        editingAccountId = item.account.id
+                                                        showAccountEditor = true
+                                                    },
+                                                    onToggleArchiveAccount = { id, archived ->
+                                                        viewModel.setAccountArchived(id, archived)
+                                                    },
+                                                    onDeleteAccountPermanently = { id ->
+                                                        viewModel.deleteAccountPermanently(id)
+                                                    },
+                                                    onDecryptSecret = { viewModel.decryptSecretField(it) },
+                                                    onRequestVerifiedAction = requestVaultVerifiedAction
+                                                )
+                                            }
+
+                                            OrganizerDestination.SERVICES -> {
+                                                ServicesScreen(
+                                                    services = services,
+                                                    serviceAccounts = allServiceAccounts,
+                                                    standaloneAccounts = filteredAccounts,
+                                                    categories = categories,
+                                                    selectedServiceIdForDetail = selectedServiceIdForDetail,
+                                                    duplicatePrompt = duplicateServicePrompt,
+                                                    onSelectServiceForDetail = { selectedServiceIdForDetail = it },
+                                                    onCreateServiceClick = {
+                                                        editingServiceId = null
+                                                        showServiceEditor = true
+                                                    },
+                                                    onEditServiceClick = { svc ->
+                                                        editingServiceId = svc.service.id
+                                                        showServiceEditor = true
+                                                    },
+                                                    onToggleArchiveService = { id, archived ->
+                                                        viewModel.setServiceArchived(id, archived)
+                                                    },
+                                                    onResolveDeleteService = { serviceId, resolution, reassignId, onCompleted, onError ->
+                                                        viewModel.deleteOrResolveService(
+                                                            serviceId = serviceId,
+                                                            resolution = resolution,
+                                                            reassignTargetServiceId = reassignId,
+                                                            onCompleted = onCompleted,
+                                                            onError = onError
+                                                        )
+                                                    },
+                                                    onConfirmDuplicateServiceVariation = {
+                                                        val dup = duplicateServicePrompt
+                                                        if (dup != null) {
+                                                            viewModel.saveService(
+                                                                existingId = dup.existingId,
+                                                                name = dup.pendingName,
+                                                                websiteUrl = dup.pendingWebsiteUrl,
+                                                                description = dup.pendingDescription,
+                                                                iconAssetId = dup.pendingIconAssetId,
+                                                                allowDuplicateVariation = true,
+                                                                onSaved = {
+                                                                    showServiceEditor = false
+                                                                    editingServiceId = null
+                                                                },
+                                                                onError = {}
+                                                            )
+                                                        }
+                                                    },
+                                                    onDismissDuplicatePrompt = {
+                                                        viewModel.dismissDuplicateServicePrompt()
+                                                    },
+                                                    onDecryptSecret = { viewModel.decryptSecretField(it) },
+                                                    onRequestVerifiedAction = requestVaultVerifiedAction,
+                                                    onSaveServiceAccount = { existingId, serviceId, linkedAccId, displayName, email, username, password, clearSavedPassword, categoryId, purpose, recEmail, recPhone, webUrl, notes, status, onSaved, onError ->
+                                                        viewModel.saveServiceAccount(
+                                                            existingId = existingId,
+                                                            serviceId = serviceId,
+                                                            linkedAccountId = linkedAccId,
+                                                            displayName = displayName,
+                                                            email = email,
+                                                            username = username,
+                                                            password = password,
+                                                            clearSavedPassword = clearSavedPassword,
+                                                            categoryId = categoryId,
+                                                            purpose = purpose,
+                                                            recoveryEmailReference = recEmail,
+                                                            recoveryPhoneReference = recPhone,
+                                                            websiteUrl = webUrl,
+                                                            notes = notes,
+                                                            status = status,
+                                                            onSaved = onSaved,
+                                                            onError = onError
+                                                        )
+                                                    },
+                                                    onToggleArchiveServiceAccount = { id, archived ->
+                                                        viewModel.setServiceAccountArchived(id, archived)
+                                                    },
+                                                    onDeleteServiceAccountPermanently = { id ->
+                                                        viewModel.deleteServiceAccountPermanently(id)
+                                                    }
+                                                )
+                                            }
+
+                                            OrganizerDestination.CATEGORIES -> {
+                                                CategoriesScreen(
+                                                    categories = categories,
+                                                    onSaveCategory = { existingId, name, description, onSaved, onError ->
+                                                        viewModel.saveCategory(
+                                                            existingId = existingId,
+                                                            name = name,
+                                                            description = description,
+                                                            onSaved = onSaved,
+                                                            onError = onError
+                                                        )
+                                                    },
+                                                    onDeleteCategorySafely = { categoryId, reassignToId, onCompleted ->
+                                                        viewModel.deleteCategorySafely(
+                                                            categoryId = categoryId,
+                                                            reassignToCategoryId = reassignToId,
+                                                            onCompleted = onCompleted
+                                                        )
+                                                    },
+                                                    onBrowseCategoryAccounts = { categoryId ->
+                                                        viewModel.clearAllFilters()
+                                                        viewModel.selectCategoryFilter(categoryId)
+                                                        currentDestinationName = OrganizerDestination.ACCOUNTS.name
+                                                    }
+                                                )
+                                            }
+
+                                            OrganizerDestination.BACKUP -> {
+                                                BackupScreen(
+                                                    accounts = filteredAccounts,
+                                                    services = services,
+                                                    categories = categories,
+                                                    savedVaultBackups = savedVaultBackups,
+                                                    stagedBackup = stagedBackup,
+                                                    conflictResolutions = conflictResolutions,
+                                                    generatedExportLockKey = generatedExportLockKey,
+                                                    onPrepareAutoLockedBackup = { mode, accIds, svcIds, catIds, onKeyReady, onError ->
+                                                        viewModel.prepareAutoLockedEncryptedBackup(
+                                                            mode = mode,
+                                                            selectedAccountIds = accIds,
+                                                            selectedServiceIds = svcIds,
+                                                            selectedCategoryIds = catIds,
+                                                            onLockKeyGenerated = onKeyReady,
+                                                            onError = onError
+                                                        )
+                                                    },
+                                                    onClearGeneratedExportLockKey = {
+                                                        viewModel.clearGeneratedExportLockKey()
+                                                    },
+                                                    onSavePendingBackupDirectly = { fileName, onError ->
+                                                        viewModel.savePendingEncryptedBackupDirectly(fileName, onError)
+                                                    },
+                                                    onWritePendingBackupToUri = { uri ->
+                                                        viewModel.writePendingEncryptedBackupToUri(activity, uri)
+                                                    },
+                                                    onSavePlaintextCsvDirectly = { fileName, onError ->
+                                                        viewModel.savePlaintextCsvDirectly(fileName, onError)
+                                                    },
+                                                    onPreparePlaintextCsv = { onReady, onError ->
+                                                        viewModel.preparePlaintextCsvExport(onReady, onError)
+                                                    },
+                                                    onWritePendingCsvToUri = { uri ->
+                                                        viewModel.writePendingCsvToUri(activity, uri)
+                                                    },
+                                                    onStageBackupFromVaultFile = { vaultPath, lockKey, onError ->
+                                                        viewModel.stageBackupFromVaultFile(vaultPath, lockKey, onError)
+                                                    },
+                                                    onStageBackupFromUri = { uri, lockKey, onError ->
+                                                        viewModel.stageBackupFromUri(activity, uri, lockKey, onError)
+                                                    },
+                                                    onDeleteVaultBackupFile = { vaultPath ->
+                                                        viewModel.deleteVaultBackupFile(vaultPath)
+                                                    },
+                                                    onUpdateConflictResolution = { incomingId, resolution ->
+                                                        viewModel.updateConflictResolution(incomingId, resolution)
+                                                    },
+                                                    onCancelStagedBackup = { viewModel.cancelStagedBackup() },
+                                                    onCommitStagedBackup = { onError ->
+                                                        viewModel.commitStagedBackup(onError)
+                                                    }
+                                                )
+                                            }
+
+                                            OrganizerDestination.SETTINGS -> {
+                                                SettingsScreen(
+                                                    unlockedState = lockState,
+                                                    themePreference = themePreference,
+                                                    colorPalette = colorPalette,
+                                                    isBiometricHardwareAvailable = isBiometricHardwareAvailable,
+                                                    onSelectThemePreference = { viewModel.setThemePreference(it) },
+                                                    onSelectColorPalette = { viewModel.setColorPalette(it) },
+                                                    onSetPasswordManagerLockEnabled = {
+                                                        viewModel.setPasswordManagerLockEnabled(it)
+                                                    },
+                                                    onSetUseMasterPasswordForVault = {
+                                                        viewModel.setUseMasterPasswordForVault(it)
+                                                    },
+                                                    onEnableAppLock = { password, timeout, onError ->
+                                                        viewModel.enableAppLock(password, timeout, onError)
+                                                    },
+                                                    onChangeMasterPassword = { currentPass, newPass, onSuccess, onError ->
+                                                        viewModel.changeMasterPassword(
+                                                            currentPass,
+                                                            newPass,
+                                                            onSuccess,
+                                                            onError
+                                                        )
+                                                    },
+                                                    onDisableAppLock = { currentPass, onSuccess, onError ->
+                                                        viewModel.disableAppLock(currentPass, onSuccess, onError)
+                                                    },
+                                                    onUpdateAutoLockTimeout = {
+                                                        viewModel.updateAutoLockTimeout(it)
+                                                    },
+                                                    onToggleBiometricUnlock = { enable ->
+                                                        if (enable) {
+                                                            viewModel.prepareBiometricEnrollmentCipher()
+                                                                .onSuccess { cipher ->
+                                                                    launchCryptoBiometricPrompt(
+                                                                        activity = activity,
+                                                                        title = "Enable Fingerprint Verification",
+                                                                        subtitle = "Verify your fingerprint to enable biometric unlock and recovery",
+                                                                        cipher = cipher,
+                                                                        onAuthenticated = { authCipher ->
+                                                                            viewModel.completeBiometricEnrollment(authCipher)
+                                                                        }
+                                                                    )
+                                                                }
+                                                        } else {
+                                                            viewModel.disableBiometricUnlock()
+                                                        }
+                                                    },
+                                                    onRequestVerifiedAction = requestVaultVerifiedAction,
+                                                    onGetDecryptedRecoveryCode = {
+                                                        viewModel.getDecryptedRecoveryCode()
+                                                    },
+                                                    onDownloadRecoveryCodeOnce = triggerOneTimeRecoveryCodeDownload,
+                                                    onLockNow = { viewModel.lockOrganizerNow() }
+                                                )
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            }
-
-            if (showAccountEditor) {
-                AccountEditorDialog(
-                    initialAccount = editingAccount,
-                    initialDecryptedPassword = initialAccountPassword,
-                    categories = categories,
-                    onDismiss = {
-                        showAccountEditor = false
-                        editingAccount = null
-                    },
-                    onSave = { existingId, displayName, email, username, password, categoryId, purpose, recEmail, recPhone, notes, status, onError ->
-                        viewModel.saveAccount(
-                            existingId = existingId,
-                            displayName = displayName,
-                            email = email,
-                            username = username,
-                            password = password,
-                            categoryId = categoryId,
-                            purpose = purpose,
-                            recoveryEmailReference = recEmail,
-                            recoveryPhoneReference = recPhone,
-                            notes = notes,
-                            status = status,
-                            onSaved = {
-                                showAccountEditor = false
-                                editingAccount = null
-                            },
-                            onError = onError
-                        )
-                    }
-                )
-            }
-
-            if (showServiceEditor) {
-                ServiceEditorDialog(
-                    initialService = editingService,
-                    onImportCustomLogo = { uri, onImported, onError ->
-                        viewModel.importServiceLogo(uri, onImported, onError)
-                    },
-                    onFetchWebsiteLogo = { url, onFetched, onError ->
-                        viewModel.fetchServiceLogoFromUrl(url, onFetched, onError)
-                    },
-                    onCancelWebsiteLogoFetch = {
-                        viewModel.cancelServiceLogoFetch()
-                    },
-                    onDismiss = {
-                        showServiceEditor = false
-                        editingService = null
-                    },
-                    onSave = { existingId, name, websiteUrl, description, iconAssetId, onError ->
-                        viewModel.saveService(
-                            existingId = existingId,
-                            name = name,
-                            websiteUrl = websiteUrl,
-                            description = description,
-                            iconAssetId = iconAssetId,
-                            onSaved = {
-                                showServiceEditor = false
-                                editingService = null
-                            },
-                            onError = onError
-                        )
-                    }
-                )
             }
 
             if (showVaultVerificationDialog) {

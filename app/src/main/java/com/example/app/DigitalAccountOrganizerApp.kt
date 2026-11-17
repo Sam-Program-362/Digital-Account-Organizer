@@ -7,6 +7,7 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import com.example.core.database.EncryptedDatabaseFactory
 import com.example.core.database.OrganizerRepository
+import com.example.core.files.BackupVaultStorage
 import com.example.core.files.ServiceAssetStorage
 import com.example.core.files.WebsiteLogoFetcher
 import com.example.core.security.AndroidKeystoreKeyWrapper
@@ -30,6 +31,7 @@ class AppContainer(context: Context) {
         keyManager = keyManager
     )
     val assetStorage = ServiceAssetStorage(appContext)
+    val backupVaultStorage = BackupVaultStorage(appContext)
     val websiteLogoFetcher = WebsiteLogoFetcher(
         context = appContext,
         assetStorage = assetStorage

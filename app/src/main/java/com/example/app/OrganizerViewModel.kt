@@ -10,6 +10,8 @@ import com.example.core.database.SaveAccountOutcome
 import com.example.core.database.SaveCategoryOutcome
 import com.example.core.database.SaveServiceAccountOutcome
 import com.example.core.database.SaveServiceOutcome
+import com.example.core.files.BackupVaultStorage
+import com.example.core.files.SavedVaultBackupEntry
 import com.example.core.security.AutoLockTimeout
 import com.example.core.security.DatabaseKeyManager
 import com.example.core.security.LockState
@@ -77,6 +79,7 @@ class OrganizerViewModel(
     private val keyManager: DatabaseKeyManager = container.keyManager
     private val repository: OrganizerRepository = container.repository
     private val backupEngine: BackupEngine = container.backupEngine
+    private val backupVaultStorage: BackupVaultStorage = container.backupVaultStorage
 
     val lockState: StateFlow<LockState> = keyManager.lockState
 
@@ -101,11 +104,28 @@ class OrganizerViewModel(
     private val _conflictResolutions = MutableStateFlow<Map<String, ConflictResolution>>(emptyMap())
     val conflictResolutions: StateFlow<Map<String, ConflictResolution>> = _conflictResolutions.asStateFlow()
 
+    private val _savedVaultBackups = MutableStateFlow<List<SavedVaultBackupEntry>>(emptyList())
+    val savedVaultBackups: StateFlow<List<SavedVaultBackupEntry>> = _savedVaultBackups.asStateFlow()
+
     private val _pendingExportBytes = MutableStateFlow<ByteArray?>(null)
     private val _generatedExportLockKey = MutableStateFlow<String?>(null)
     val generatedExportLockKey: StateFlow<String?> = _generatedExportLockKey.asStateFlow()
 
     private val _pendingCsvContent = MutableStateFlow<String?>(null)
+
+    init {
+        refreshSavedVaultBackups()
+    }
+
+    fun refreshSavedVaultBackups() {
+        viewModelScope.launch {
+            runCatching {
+                backupVaultStorage.listSavedBackups()
+            }.onSuccess { list ->
+                _savedVaultBackups.value = list
+            }
+        }
+    }
 
     private fun <T> unlockedFlow(defaultValue: T, block: () -> Flow<T>): StateFlow<T> {
         return lockState.flatMapLatest { state ->
@@ -254,6 +274,26 @@ class OrganizerViewModel(
     fun getDecryptedRecoveryCode(): String? =
         keyManager.getDecryptedRecoveryCode()
 
+    fun saveOneTimeRecoveryCodeDirectly(fileName: String) {
+        val code = keyManager.getDecryptedRecoveryCode()
+        if (code.isNullOrBlank()) {
+            _transientMessage.value = "No recovery code available to download."
+            return
+        }
+        viewModelScope.launch {
+            runCatching {
+                val content = buildRecoveryCodeFileText(code)
+                val result = backupVaultStorage.saveRecoveryCodeToDownloadsAndVault(fileName, content)
+                keyManager.markRecoveryCodeFileDownloadedOnce()
+                result
+            }.onSuccess { result ->
+                _transientMessage.value = "Recovery code saved to ${result.displayLocation} (one-time download completed)."
+            }.onFailure { e ->
+                _transientMessage.value = "Could not save recovery code file: ${e.message}"
+            }
+        }
+    }
+
     fun writeOneTimeRecoveryCodeToUri(context: Context, destinationUri: Uri) {
         val code = keyManager.getDecryptedRecoveryCode()
         if (code.isNullOrBlank()) {
@@ -262,19 +302,7 @@ class OrganizerViewModel(
         }
         viewModelScope.launch {
             runCatching {
-                val content = buildString {
-                    appendLine("==================================================")
-                    appendLine("DIGITAL ACCOUNT ORGANIZER — RECOVERY CODE")
-                    appendLine("==================================================")
-                    appendLine("Generated / Exported (UTC): ${Instant.now()}")
-                    appendLine()
-                    appendLine("Recovery Code:")
-                    appendLine(code)
-                    appendLine()
-                    appendLine("Keep this file in a safe place outside this device.")
-                    appendLine("This recovery code can reset a forgotten Master Password.")
-                    appendLine("==================================================")
-                }
+                val content = buildRecoveryCodeFileText(code)
                 context.contentResolver.openOutputStream(destinationUri)?.use { out ->
                     out.write(content.toByteArray(Charsets.UTF_8))
                     out.flush()
@@ -286,6 +314,20 @@ class OrganizerViewModel(
                 _transientMessage.value = "Could not save recovery code file: ${e.message}"
             }
         }
+    }
+
+    private fun buildRecoveryCodeFileText(code: String): String = buildString {
+        appendLine("==================================================")
+        appendLine("DIGITAL ACCOUNT ORGANIZER — RECOVERY CODE")
+        appendLine("==================================================")
+        appendLine("Generated / Exported (UTC): ${Instant.now()}")
+        appendLine()
+        appendLine("Recovery Code:")
+        appendLine(code)
+        appendLine()
+        appendLine("Keep this file in a safe place outside this device.")
+        appendLine("This recovery code can reset a forgotten Master Password.")
+        appendLine("==================================================")
     }
 
     // --- Filter mutations (Standalone Accounts) ---
@@ -656,6 +698,7 @@ class OrganizerViewModel(
         email: String?,
         username: String?,
         password: String?,
+        clearSavedPassword: Boolean = false,
         categoryId: String?,
         purpose: String?,
         recoveryEmailReference: String?,
@@ -673,6 +716,7 @@ class OrganizerViewModel(
                     email = email,
                     username = username,
                     password = password,
+                    clearSavedPassword = clearSavedPassword,
                     categoryId = categoryId,
                     purpose = purpose,
                     recoveryEmailReference = recoveryEmailReference,
@@ -715,6 +759,7 @@ class OrganizerViewModel(
         email: String?,
         username: String?,
         password: String?,
+        clearSavedPassword: Boolean = false,
         categoryId: String?,
         purpose: String?,
         recoveryEmailReference: String?,
@@ -735,6 +780,7 @@ class OrganizerViewModel(
                     email = email,
                     username = username,
                     password = password,
+                    clearSavedPassword = clearSavedPassword,
                     categoryId = categoryId,
                     purpose = purpose,
                     recoveryEmailReference = recoveryEmailReference,
@@ -782,7 +828,7 @@ class OrganizerViewModel(
         }
     }
 
-    // --- Backup & Restore Operations (App-Generated Export Lock Key) ---
+    // --- Backup & Restore Operations (App-Generated Export Lock Key + Direct Save to Downloads & Vault) ---
     fun prepareAutoLockedEncryptedBackup(
         mode: ExportMode,
         selectedAccountIds: Set<String> = emptySet(),
@@ -819,6 +865,30 @@ class OrganizerViewModel(
         _generatedExportLockKey.value = null
     }
 
+    fun savePendingEncryptedBackupDirectly(
+        fileName: String,
+        onError: (String) -> Unit
+    ) {
+        val bytes = _pendingExportBytes.value
+        if (bytes == null) {
+            onError("No pending encrypted backup to save. Please generate a new Export Lock Key.")
+            return
+        }
+        viewModelScope.launch {
+            runCatching {
+                backupVaultStorage.saveBackupBytesToDownloadsAndVault(fileName, bytes)
+            }.onSuccess { result ->
+                _pendingExportBytes.value = null
+                _generatedExportLockKey.value = null
+                refreshSavedVaultBackups()
+                _transientMessage.value =
+                    "Locked .dao-backup saved to ${result.displayLocation} (${(bytes.size / 1024).coerceAtLeast(1)} KB)."
+            }.onFailure { e ->
+                onError(e.message ?: "Could not save .dao-backup file.")
+            }
+        }
+    }
+
     fun writePendingEncryptedBackupToUri(context: Context, destinationUri: Uri) {
         val bytes = _pendingExportBytes.value ?: return
         viewModelScope.launch {
@@ -827,12 +897,33 @@ class OrganizerViewModel(
                     out.write(bytes)
                     out.flush()
                 } ?: error("Unable to open destination file.")
+                // Also save a copy in the built-in Backup Vault for convenient access
+                val fallbackName = "digital_accounts_${System.currentTimeMillis()}.dao-backup"
+                backupVaultStorage.saveBackupBytesToDownloadsAndVault(fallbackName, bytes)
             }.onSuccess {
-                _transientMessage.value = "Encrypted .dao-backup exported (${bytes.size / 1024} KB). Keep your Export Lock Key safe!"
+                refreshSavedVaultBackups()
+                _transientMessage.value = "Encrypted .dao-backup exported (${(bytes.size / 1024).coerceAtLeast(1)} KB). Keep your Export Lock Key safe!"
             }.onFailure { e ->
                 _transientMessage.value = "Export failed: ${e.message}"
             }
             _pendingExportBytes.value = null
+        }
+    }
+
+    fun savePlaintextCsvDirectly(
+        fileName: String,
+        onError: (String) -> Unit
+    ) {
+        viewModelScope.launch {
+            runCatching {
+                val csv = backupEngine.exportPlaintextCsv()
+                backupVaultStorage.saveCsvToDownloadsAndVault(fileName, csv)
+            }.onSuccess { result ->
+                refreshSavedVaultBackups()
+                _transientMessage.value = "Plaintext CSV saved to ${result.displayLocation}."
+            }.onFailure { e ->
+                onError(e.message ?: "Failed to export CSV.")
+            }
         }
     }
 
@@ -869,6 +960,28 @@ class OrganizerViewModel(
         }
     }
 
+    fun stageBackupFromVaultFile(
+        vaultFilePath: String,
+        passphraseInput: String,
+        onError: (String) -> Unit
+    ) {
+        val passChars = passphraseInput.toCharArray()
+        viewModelScope.launch {
+            try {
+                val fileBytes = backupVaultStorage.readVaultFileBytes(vaultFilePath)
+                val staged = backupEngine.stageAndPreviewEncryptedBackup(fileBytes, passChars)
+                _stagedBackup.value = staged
+                _conflictResolutions.value = staged.conflicts.associate {
+                    it.incomingId to ConflictResolution.SKIP
+                }
+            } catch (e: Exception) {
+                onError(e.message ?: "Incorrect Export Lock Key or damaged backup file.")
+            } finally {
+                passChars.clearChars()
+            }
+        }
+    }
+
     fun stageBackupFromUri(
         context: Context,
         sourceUri: Uri,
@@ -891,6 +1004,16 @@ class OrganizerViewModel(
                 onError(e.message ?: "Incorrect Export Lock Key or damaged backup file.")
             } finally {
                 passChars.clearChars()
+            }
+        }
+    }
+
+    fun deleteVaultBackupFile(vaultFilePath: String) {
+        viewModelScope.launch {
+            val deleted = backupVaultStorage.deleteVaultFile(vaultFilePath)
+            refreshSavedVaultBackups()
+            if (deleted) {
+                _transientMessage.value = "Backup file removed from Built-In Backup Vault."
             }
         }
     }

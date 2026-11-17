@@ -4,6 +4,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.BitmapFactory
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -11,8 +12,12 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -21,9 +26,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Key
@@ -37,6 +44,9 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -44,7 +54,6 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -73,6 +82,170 @@ import com.example.domain.model.PasswordGenerator
 import com.example.domain.model.ServiceAssetRecord
 import com.example.ui.theme.JetBrainsMonoFontFamily
 import java.io.File
+
+/**
+ * Full-screen sub-page header and container that replaces pop-up AlertDialogs for Detail and Add/Edit screens.
+ * Includes automatic BackHandler integration and a refined top header bar.
+ */
+@Composable
+fun FullScreenSubpageScaffold(
+    title: String,
+    subtitle: String? = null,
+    onBack: () -> Unit,
+    backButtonTestTag: String = "subpage_back_button",
+    modifier: Modifier = Modifier,
+    actions: @Composable RowScope.() -> Unit = {},
+    content: @Composable ColumnScope.() -> Unit
+) {
+    BackHandler(onBack = onBack)
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+    ) {
+        Surface(
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 2.dp,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(
+                            onClick = onBack,
+                            modifier = Modifier.testTag(backButtonTestTag)
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "Navigate back"
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = title,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            if (!subtitle.isNullOrBlank()) {
+                                Text(
+                                    text = subtitle,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.padding(end = 4.dp),
+                        content = actions
+                    )
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f))
+            }
+        }
+
+        Column(
+            modifier = Modifier
+                .fillMaxSize(),
+            content = content
+        )
+    }
+}
+
+/**
+ * Clean, elevated section card for grouping fields and details on full-screen pages.
+ */
+@Composable
+fun FormSectionCard(
+    title: String,
+    subtitle: String? = null,
+    icon: ImageVector? = null,
+    modifier: Modifier = Modifier,
+    trailingHeader: (@Composable () -> Unit)? = null,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.32f))
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    if (icon != null) {
+                        Box(
+                            modifier = Modifier
+                                .size(34.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = icon,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+                    Column {
+                        Text(
+                            text = title,
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        if (!subtitle.isNullOrBlank()) {
+                            Text(
+                                text = subtitle,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+                if (trailingHeader != null) {
+                    Spacer(modifier = Modifier.width(8.dp))
+                    trailingHeader()
+                }
+            }
+
+            content()
+        }
+    }
+}
 
 /**
  * Renders a standalone Account's monogram avatar inside a rounded badge.
@@ -207,16 +380,16 @@ fun ProtectedVaultFieldCard(
     var copiedFeedback by remember { mutableStateOf(false) }
 
     Surface(
-        shape = MaterialTheme.shapes.small,
-        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f),
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.28f),
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)),
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp)
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -225,17 +398,18 @@ fun ProtectedVaultFieldCard(
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.weight(1f)
                 ) {
                     Icon(
                         imageVector = Icons.Default.Lock,
                         contentDescription = null,
                         tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(14.dp)
+                        modifier = Modifier.size(15.dp)
                     )
                     Text(
                         text = "$label (Encrypted Vault)",
-                        style = MaterialTheme.typography.labelSmall,
+                        style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.primary
                     )
@@ -310,24 +484,141 @@ fun ProtectedVaultFieldCard(
 }
 
 /**
- * Built-in Password Manager field editor with Show/Hide toggle, Password Generator, and Strength badge.
+ * Built-in Password Manager field editor with Show/Hide toggle, Password Generator, Strength badge,
+ * and secure edit behavior:
+ * - When editing an item with an existing saved password ([hasExistingSavedPassword] == true),
+ *   the input starts blank and displays `"Saved • enter password to change to new"` so the existing
+ *   password cannot be exposed simply by opening Edit.
+ * - Includes an explicit `"Clear saved password"` toggle chip if the user wants to remove the saved password.
+ * - Properly weights the helper caption with `Modifier.weight(1f)` so the `"Generate Strong"` button
+ *   never wraps vertically or creates empty vertical space.
  */
 @Composable
 fun PasswordManagerFieldEditor(
     password: String,
     onPasswordChange: (String) -> Unit,
-    label: String = "Password (Encrypted with AES-256-GCM)",
+    label: String = "Password (Encrypted)",
     isOptional: Boolean = true,
+    hasExistingSavedPassword: Boolean = false,
+    clearSavedPassword: Boolean = false,
+    onClearSavedPasswordChange: ((Boolean) -> Unit)? = null,
     testTag: String = "password_manager_input"
 ) {
     var showPassword by remember { mutableStateOf(false) }
     val strengthLabel = remember(password) { PasswordGenerator.estimateStrengthLabel(password) }
 
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        if (hasExistingSavedPassword) {
+            Surface(
+                shape = RoundedCornerShape(10.dp),
+                color = if (clearSavedPassword) {
+                    MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.45f)
+                } else {
+                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
+                },
+                border = BorderStroke(
+                    1.dp,
+                    if (clearSavedPassword) {
+                        MaterialTheme.colorScheme.error.copy(alpha = 0.5f)
+                    } else {
+                        MaterialTheme.colorScheme.primary.copy(alpha = 0.4f)
+                    }
+                ),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(end = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (clearSavedPassword) Icons.Default.Close else Icons.Default.Lock,
+                            contentDescription = null,
+                            tint = if (clearSavedPassword) {
+                                MaterialTheme.colorScheme.error
+                            } else {
+                                MaterialTheme.colorScheme.primary
+                            },
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = when {
+                                clearSavedPassword -> "Saved password will be removed when you save"
+                                password.isNotEmpty() -> "Entering a new password to replace saved password"
+                                else -> "Saved • enter password to change to new"
+                            },
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Medium,
+                            color = if (clearSavedPassword) {
+                                MaterialTheme.colorScheme.onErrorContainer
+                            } else {
+                                MaterialTheme.colorScheme.onSurface
+                            },
+                            modifier = Modifier.testTag("${testTag}_saved_status_text")
+                        )
+                    }
+
+                    if (onClearSavedPasswordChange != null) {
+                        FilterChip(
+                            selected = clearSavedPassword,
+                            onClick = {
+                                val next = !clearSavedPassword
+                                onClearSavedPasswordChange(next)
+                                if (next) {
+                                    onPasswordChange("")
+                                }
+                            },
+                            label = {
+                                Text(
+                                    text = if (clearSavedPassword) "Keep Saved" else "Clear Password",
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            },
+                            modifier = Modifier.testTag("${testTag}_clear_saved_chip")
+                        )
+                    }
+                }
+            }
+        }
+
         OutlinedTextField(
             value = password,
-            onValueChange = onPasswordChange,
-            label = { Text(if (isOptional) "$label (Optional)" else "$label *") },
+            onValueChange = { newValue ->
+                if (clearSavedPassword && newValue.isNotEmpty()) {
+                    onClearSavedPasswordChange?.invoke(false)
+                }
+                onPasswordChange(newValue)
+            },
+            label = {
+                Text(
+                    when {
+                        hasExistingSavedPassword -> "New Password (leave blank to keep saved)"
+                        isOptional -> "$label (Optional)"
+                        else -> "$label *"
+                    }
+                )
+            },
+            placeholder = {
+                Text(
+                    if (hasExistingSavedPassword) {
+                        "Saved • enter password to change to new"
+                    } else {
+                        "Enter or generate a strong password"
+                    }
+                )
+            },
             singleLine = true,
             visualTransformation = if (showPassword) {
                 VisualTransformation.None
@@ -356,30 +647,42 @@ fun PasswordManagerFieldEditor(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            if (password.isNotEmpty()) {
-                Text(
-                    text = "Strength: $strengthLabel",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary
-                )
-            } else {
-                Text(
-                    text = "Stored encrypted inside SQLCipher + AES-256-GCM",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
+            Text(
+                text = if (password.isNotEmpty()) {
+                    "Strength: $strengthLabel • Encrypted with AES-256-GCM"
+                } else {
+                    "Stored encrypted inside SQLCipher + AES-256-GCM"
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = if (password.isNotEmpty()) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(end = 8.dp)
+            )
 
-            TextButton(
+            FilledTonalButton(
                 onClick = {
+                    onClearSavedPasswordChange?.invoke(false)
                     onPasswordChange(PasswordGenerator.generatePassword(length = 16))
                     showPassword = true
                 },
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                 modifier = Modifier.testTag("${testTag}_generate_button")
             ) {
-                Icon(Icons.Default.AutoFixHigh, contentDescription = null, modifier = Modifier.size(16.dp))
-                Spacer(Modifier.width(4.dp))
-                Text("Generate Strong")
+                Icon(
+                    imageVector = Icons.Default.AutoFixHigh,
+                    contentDescription = null,
+                    modifier = Modifier.size(15.dp)
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    text = "Generate Strong",
+                    style = MaterialTheme.typography.labelMedium
+                )
             }
         }
     }

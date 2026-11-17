@@ -4,6 +4,12 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -22,18 +28,23 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Archive
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Unarchive
@@ -42,6 +53,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -72,6 +84,8 @@ import com.example.core.designsystem.AccountStatusBadge
 import com.example.core.designsystem.CategoryBadgeChip
 import com.example.core.designsystem.DestructiveConfirmationDialog
 import com.example.core.designsystem.EmptyStateCard
+import com.example.core.designsystem.FormSectionCard
+import com.example.core.designsystem.FullScreenSubpageScaffold
 import com.example.core.designsystem.PasswordManagerFieldEditor
 import com.example.core.designsystem.ProtectedVaultFieldCard
 import com.example.core.designsystem.ServiceLogoFrame
@@ -116,6 +130,7 @@ fun ServicesScreen(
         email: String?,
         username: String?,
         password: String?,
+        clearSavedPassword: Boolean,
         categoryId: String?,
         purpose: String?,
         recoveryEmailReference: String?,
@@ -134,8 +149,7 @@ fun ServicesScreen(
     var deletingService by remember { mutableStateOf<ServiceWithCount?>(null) }
 
     var addingOrEditingForServiceId by rememberSaveable { mutableStateOf<String?>(null) }
-    var editingServiceAccount by remember { mutableStateOf<ServiceAccountWithDetails?>(null) }
-    var initialServiceAccountPassword by remember { mutableStateOf("") }
+    var editingServiceAccountId by rememberSaveable { mutableStateOf<String?>(null) }
     var viewingServiceAccountId by rememberSaveable { mutableStateOf<String?>(null) }
     var deletingServiceAccount by remember { mutableStateOf<ServiceAccountWithDetails?>(null) }
 
@@ -153,7 +167,8 @@ fun ServicesScreen(
         }
 
         services.filter { item ->
-            val archiveOk = if (showArchivedServices) true else !item.service.isArchived
+            // When "Archived" chip is toggled ON, show ONLY archived services and hide active ones.
+            val archiveOk = if (showArchivedServices) item.service.isArchived else !item.service.isArchived
             val queryOk = if (q.isEmpty()) {
                 true
             } else {
@@ -174,224 +189,284 @@ fun ServicesScreen(
         serviceAccounts.firstOrNull { it.serviceAccount.id == viewingServiceAccountId }
     }
 
+    val editingServiceAccount = remember(serviceAccounts, editingServiceAccountId) {
+        serviceAccounts.firstOrNull { it.serviceAccount.id == editingServiceAccountId }
+    }
+
+    val targetServiceForForm = remember(services, addingOrEditingForServiceId) {
+        services.firstOrNull { it.service.id == addingOrEditingForServiceId }
+    }
+
     val openEditServiceAccount: (ServiceAccountWithDetails) -> Unit = { entry ->
-        if (entry.serviceAccount.hasPassword || entry.serviceAccount.hasNotes) {
-            onRequestVerifiedAction {
-                editingServiceAccount = entry
-                initialServiceAccountPassword =
-                    onDecryptSecret(entry.serviceAccount.encryptedPassword).orEmpty()
-                addingOrEditingForServiceId = entry.service.id
-            }
-        } else {
-            editingServiceAccount = entry
-            initialServiceAccountPassword = ""
-            addingOrEditingForServiceId = entry.service.id
-        }
+        editingServiceAccountId = entry.serviceAccount.id
+        addingOrEditingForServiceId = entry.service.id
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .testTag("services_screen")
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "Services",
-                    style = MaterialTheme.typography.headlineSmall
-                )
-                Text(
-                    text = "Create services and add detailed Service Account entries (linked or custom with optional passwords).",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            Spacer(modifier = Modifier.width(12.dp))
-            Button(
-                onClick = onCreateServiceClick,
-                modifier = Modifier.testTag("create_service_button")
-            ) {
-                Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(6.dp))
-                Text("Create Service")
-            }
-        }
+    // Priority of full-screen pages inside Services tab:
+    // 1. Add / Edit Service Account Page
+    // 2. Service Account Detail Page
+    // 3. Service Detail Page
+    // 4. Services List Page
+    val currentPageKey = when {
+        targetServiceForForm != null -> "EDITOR_${targetServiceForForm.service.id}_${editingServiceAccountId.orEmpty()}"
+        viewingServiceAccount != null -> "ENTRY_DETAIL_${viewingServiceAccount.serviceAccount.id}"
+        detailService != null -> "SERVICE_DETAIL_${detailService.service.id}"
+        else -> "SERVICES_LIST"
+    }
 
-        // Separate search bar for Services & Service Accounts
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            OutlinedTextField(
-                value = searchQuery,
-                onValueChange = { searchQuery = it },
-                placeholder = { Text("Search services or service accounts...") },
-                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-                trailingIcon = {
-                    if (searchQuery.isNotEmpty()) {
-                        IconButton(onClick = { searchQuery = "" }) {
-                            Icon(Icons.Default.Close, contentDescription = "Clear search")
-                        }
-                    }
-                },
-                singleLine = true,
-                modifier = Modifier
-                    .weight(1f)
-                    .testTag("services_search_input")
-            )
-            FilterChip(
-                selected = showArchivedServices,
-                onClick = { showArchivedServices = !showArchivedServices },
-                label = { Text("Archived") }
-            )
-        }
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxSize()
-                .testTag("services_list"),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            if (filteredServices.isEmpty()) {
-                item {
-                    EmptyStateCard(
-                        icon = Icons.Default.Apps,
-                        title = if (searchQuery.isBlank()) "No Services Created Yet" else "No Matching Services",
-                        body = "Create a Service (such as GitHub, Google, or Proton) with a custom or fetched website logo, then add your Service Account entries inside it.",
-                        actionLabel = "Create First Service",
-                        actionTestTag = "services_empty_create_button",
-                        onActionClick = onCreateServiceClick
-                    )
-                }
+    AnimatedContent(
+        targetState = currentPageKey,
+        transitionSpec = {
+            if (targetState != "SERVICES_LIST" && initialState == "SERVICES_LIST") {
+                (slideInHorizontally { it / 4 } + fadeIn()) togetherWith
+                    (slideOutHorizontally { -it / 4 } + fadeOut())
+            } else if (targetState == "SERVICES_LIST") {
+                (slideInHorizontally { -it / 4 } + fadeIn()) togetherWith
+                    (slideOutHorizontally { it / 4 } + fadeOut())
             } else {
-                items(filteredServices, key = { it.service.id }) { item ->
-                    val entries = remember(serviceAccounts, item.service.id) {
-                        serviceAccounts.filter {
-                            it.service.id == item.service.id && !it.serviceAccount.isArchived
-                        }
+                fadeIn() togetherWith fadeOut()
+            }
+        },
+        label = "services_subpage_transition"
+    ) { pageKey ->
+        when {
+            pageKey.startsWith("EDITOR_") && targetServiceForForm != null -> {
+                ServiceAccountEditorDialog(
+                    serviceWithCount = targetServiceForForm,
+                    initialEntry = editingServiceAccount,
+                    standaloneAccounts = standaloneAccounts.filter { !it.account.isArchived },
+                    categories = categories,
+                    onDismiss = {
+                        addingOrEditingForServiceId = null
+                        editingServiceAccountId = null
+                    },
+                    onSave = { linkedAccId, displayName, email, username, password, clearSavedPassword, categoryId, purpose, recEmail, recPhone, webUrl, notes, status, onError ->
+                        onSaveServiceAccount(
+                            editingServiceAccount?.serviceAccount?.id,
+                            targetServiceForForm.service.id,
+                            linkedAccId,
+                            displayName,
+                            email,
+                            username,
+                            password,
+                            clearSavedPassword,
+                            categoryId,
+                            purpose,
+                            recEmail,
+                            recPhone,
+                            webUrl,
+                            notes,
+                            status,
+                            {
+                                addingOrEditingForServiceId = null
+                                editingServiceAccountId = null
+                            },
+                            onError
+                        )
                     }
-                    ServiceCardItem(
-                        item = item,
-                        entries = entries,
-                        onOpenDetail = { onSelectServiceForDetail(item.service.id) },
-                        onAddServiceAccount = {
-                            editingServiceAccount = null
-                            initialServiceAccountPassword = ""
-                            addingOrEditingForServiceId = item.service.id
-                        },
-                        onViewServiceAccount = { entry ->
-                            viewingServiceAccountId = entry.serviceAccount.id
-                        },
-                        onEditService = { onEditServiceClick(item) },
-                        onDeleteService = { deletingService = item }
-                    )
-                }
-            }
-        }
-    }
-
-    if (detailService != null) {
-        val entriesForService = serviceAccounts.filter { it.service.id == detailService.service.id }
-        ServiceDetailModal(
-            serviceWithCount = detailService,
-            serviceAccounts = entriesForService,
-            onDismiss = { onSelectServiceForDetail(null) },
-            onEditService = {
-                val target = detailService
-                onSelectServiceForDetail(null)
-                onEditServiceClick(target)
-            },
-            onToggleArchiveService = {
-                onToggleArchiveService(detailService.service.id, !detailService.service.isArchived)
-            },
-            onAddServiceAccount = {
-                editingServiceAccount = null
-                initialServiceAccountPassword = ""
-                addingOrEditingForServiceId = detailService.service.id
-            },
-            onViewServiceAccount = { entry ->
-                viewingServiceAccountId = entry.serviceAccount.id
-            },
-            onEditServiceAccount = { entry ->
-                openEditServiceAccount(entry)
-            },
-            onDeleteServiceAccount = { entry ->
-                deletingServiceAccount = entry
-            }
-        )
-    }
-
-    val targetServiceIdForForm = addingOrEditingForServiceId
-    if (targetServiceIdForForm != null) {
-        val svcWithCount = services.firstOrNull { it.service.id == targetServiceIdForForm }
-        if (svcWithCount != null) {
-            ServiceAccountEditorDialog(
-                serviceWithCount = svcWithCount,
-                initialEntry = editingServiceAccount,
-                initialDecryptedPassword = initialServiceAccountPassword,
-                standaloneAccounts = standaloneAccounts.filter { !it.account.isArchived },
-                categories = categories,
-                onDismiss = {
-                    addingOrEditingForServiceId = null
-                    editingServiceAccount = null
-                },
-                onSave = { linkedAccId, displayName, email, username, password, categoryId, purpose, recEmail, recPhone, webUrl, notes, status, onError ->
-                    onSaveServiceAccount(
-                        editingServiceAccount?.serviceAccount?.id,
-                        svcWithCount.service.id,
-                        linkedAccId,
-                        displayName,
-                        email,
-                        username,
-                        password,
-                        categoryId,
-                        purpose,
-                        recEmail,
-                        recPhone,
-                        webUrl,
-                        notes,
-                        status,
-                        {
-                            addingOrEditingForServiceId = null
-                            editingServiceAccount = null
-                        },
-                        onError
-                    )
-                }
-            )
-        }
-    }
-
-    if (viewingServiceAccount != null) {
-        ServiceAccountDetailDialog(
-            item = viewingServiceAccount,
-            onDecryptSecret = onDecryptSecret,
-            onRequestVerifiedAction = onRequestVerifiedAction,
-            onDismiss = { viewingServiceAccountId = null },
-            onEdit = {
-                val target = viewingServiceAccount
-                viewingServiceAccountId = null
-                openEditServiceAccount(target)
-            },
-            onToggleArchive = {
-                onToggleArchiveServiceAccount(
-                    viewingServiceAccount.serviceAccount.id,
-                    !viewingServiceAccount.serviceAccount.isArchived
                 )
             }
-        )
+
+            pageKey.startsWith("ENTRY_DETAIL_") && viewingServiceAccount != null -> {
+                ServiceAccountDetailPage(
+                    item = viewingServiceAccount,
+                    onDecryptSecret = onDecryptSecret,
+                    onRequestVerifiedAction = onRequestVerifiedAction,
+                    onBack = { viewingServiceAccountId = null },
+                    onEdit = {
+                        val target = viewingServiceAccount
+                        viewingServiceAccountId = null
+                        openEditServiceAccount(target)
+                    },
+                    onToggleArchive = {
+                        onToggleArchiveServiceAccount(
+                            viewingServiceAccount.serviceAccount.id,
+                            !viewingServiceAccount.serviceAccount.isArchived
+                        )
+                    },
+                    onDelete = {
+                        deletingServiceAccount = viewingServiceAccount
+                    }
+                )
+            }
+
+            pageKey.startsWith("SERVICE_DETAIL_") && detailService != null -> {
+                val entriesForService = remember(serviceAccounts, detailService.service.id) {
+                    serviceAccounts.filter { it.service.id == detailService.service.id }
+                }
+                ServiceDetailPage(
+                    serviceWithCount = detailService,
+                    serviceAccounts = entriesForService,
+                    onBack = { onSelectServiceForDetail(null) },
+                    onEditService = { onEditServiceClick(detailService) },
+                    onToggleArchiveService = {
+                        onToggleArchiveService(
+                            detailService.service.id,
+                            !detailService.service.isArchived
+                        )
+                    },
+                    onDeleteService = { deletingService = detailService },
+                    onAddServiceAccount = {
+                        editingServiceAccountId = null
+                        addingOrEditingForServiceId = detailService.service.id
+                    },
+                    onViewServiceAccount = { entry ->
+                        viewingServiceAccountId = entry.serviceAccount.id
+                    },
+                    onEditServiceAccount = { entry ->
+                        openEditServiceAccount(entry)
+                    },
+                    onDeleteServiceAccount = { entry ->
+                        deletingServiceAccount = entry
+                    }
+                )
+            }
+
+            else -> {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .testTag("services_screen")
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Services",
+                                style = MaterialTheme.typography.headlineSmall,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "Select any service to open its dedicated page and manage Service Account entries.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Button(
+                            onClick = onCreateServiceClick,
+                            shape = RoundedCornerShape(12.dp),
+                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
+                            modifier = Modifier.testTag("create_service_button")
+                        ) {
+                            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Create Service")
+                        }
+                    }
+
+                    // Separate search bar + Archived-only filter chip
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedTextField(
+                            value = searchQuery,
+                            onValueChange = { searchQuery = it },
+                            placeholder = { Text("Search services or service accounts...") },
+                            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                            trailingIcon = {
+                                if (searchQuery.isNotEmpty()) {
+                                    IconButton(onClick = { searchQuery = "" }) {
+                                        Icon(Icons.Default.Close, contentDescription = "Clear search")
+                                    }
+                                }
+                            },
+                            singleLine = true,
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("services_search_input")
+                        )
+                        FilterChip(
+                            selected = showArchivedServices,
+                            onClick = { showArchivedServices = !showArchivedServices },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Default.Archive,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            },
+                            label = { Text("Archived") },
+                            modifier = Modifier.testTag("services_archived_filter_chip")
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .testTag("services_list"),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        if (filteredServices.isEmpty()) {
+                            item {
+                                EmptyStateCard(
+                                    icon = if (showArchivedServices) Icons.Default.Archive else Icons.Default.Apps,
+                                    title = when {
+                                        showArchivedServices && searchQuery.isBlank() -> "No Archived Services"
+                                        showArchivedServices -> "No Matching Archived Services"
+                                        searchQuery.isBlank() -> "No Services Created Yet"
+                                        else -> "No Matching Services"
+                                    },
+                                    body = if (showArchivedServices) {
+                                        "Only archived services are shown while the Archived filter is active. Tap 'Archived' again to return to your active services."
+                                    } else {
+                                        "Create a Service (such as GitHub, Google, or Proton) with a custom or fetched website logo, then add your Service Account entries inside it."
+                                    },
+                                    actionLabel = if (showArchivedServices) "Show Active Services" else "Create First Service",
+                                    actionTestTag = "services_empty_create_button",
+                                    onActionClick = {
+                                        if (showArchivedServices) {
+                                            showArchivedServices = false
+                                        } else {
+                                            onCreateServiceClick()
+                                        }
+                                    }
+                                )
+                            }
+                        } else {
+                            items(filteredServices, key = { it.service.id }) { item ->
+                                val entries = remember(serviceAccounts, item.service.id) {
+                                    serviceAccounts.filter {
+                                        it.service.id == item.service.id && !it.serviceAccount.isArchived
+                                    }
+                                }
+                                ServiceCardItem(
+                                    item = item,
+                                    entries = entries,
+                                    onOpenDetail = { onSelectServiceForDetail(item.service.id) },
+                                    onAddServiceAccount = {
+                                        editingServiceAccountId = null
+                                        addingOrEditingForServiceId = item.service.id
+                                    },
+                                    onViewServiceAccount = { entry ->
+                                        onSelectServiceForDetail(item.service.id)
+                                        viewingServiceAccountId = entry.serviceAccount.id
+                                    },
+                                    onEditService = { onEditServiceClick(item) },
+                                    onToggleArchiveService = {
+                                        onToggleArchiveService(item.service.id, !item.service.isArchived)
+                                    },
+                                    onDeleteService = { deletingService = item }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     val targetDeleteSvc = deletingService
@@ -406,7 +481,12 @@ fun ServicesScreen(
                     targetDeleteSvc.service.id,
                     resolution,
                     reassignId,
-                    { deletingService = null },
+                    {
+                        if (selectedServiceIdForDetail == targetDeleteSvc.service.id) {
+                            onSelectServiceForDetail(null)
+                        }
+                        deletingService = null
+                    },
                     onError
                 )
             }
@@ -420,6 +500,9 @@ fun ServicesScreen(
             message = "This will permanently remove this Service Account entry from ${targetDeleteEntry.service.name}. Any linked standalone Account in your Accounts tab will remain untouched.",
             confirmLabel = "Delete Entry",
             onConfirm = {
+                if (viewingServiceAccountId == targetDeleteEntry.serviceAccount.id) {
+                    viewingServiceAccountId = null
+                }
                 onDeleteServiceAccountPermanently(targetDeleteEntry.serviceAccount.id)
                 deletingServiceAccount = null
             },
@@ -461,6 +544,7 @@ private fun ServiceCardItem(
     onAddServiceAccount: () -> Unit,
     onViewServiceAccount: (ServiceAccountWithDetails) -> Unit,
     onEditService: () -> Unit,
+    onToggleArchiveService: () -> Unit,
     onDeleteService: () -> Unit
 ) {
     Card(
@@ -468,8 +552,9 @@ private fun ServiceCardItem(
             .fillMaxWidth()
             .clickable(onClick = onOpenDetail)
             .testTag("service_card_${item.service.name}"),
+        shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f))
     ) {
         Column(
             modifier = Modifier
@@ -493,11 +578,31 @@ private fun ServiceCardItem(
                         size = 48.dp
                     )
                     Column {
-                        Text(
-                            text = item.service.name,
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.SemiBold
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = item.service.name,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            if (item.service.isArchived) {
+                                Surface(
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = MaterialTheme.colorScheme.tertiaryContainer
+                                ) {
+                                    Text(
+                                        text = "Archived",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
+                        }
                         if (!item.service.websiteUrl.isNullOrBlank()) {
                             Text(
                                 text = item.service.websiteUrl,
@@ -509,7 +614,7 @@ private fun ServiceCardItem(
                             )
                         }
                         Text(
-                            text = "${item.activeAccountCount} active service account(s)",
+                            text = "${item.activeAccountCount} active • ${item.totalAccountCount} total entry(s)",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -527,6 +632,12 @@ private fun ServiceCardItem(
                             tint = MaterialTheme.colorScheme.primary
                         )
                     }
+                    IconButton(onClick = onToggleArchiveService) {
+                        Icon(
+                            imageVector = if (item.service.isArchived) Icons.Default.Unarchive else Icons.Default.Archive,
+                            contentDescription = if (item.service.isArchived) "Unarchive ${item.service.name}" else "Archive ${item.service.name}"
+                        )
+                    }
                     IconButton(onClick = onEditService) {
                         Icon(Icons.Default.Edit, contentDescription = "Edit ${item.service.name}")
                     }
@@ -541,7 +652,7 @@ private fun ServiceCardItem(
             }
 
             if (entries.isNotEmpty()) {
-                HorizontalDivider()
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.22f))
                 entries.take(3).forEach { entry ->
                     Row(
                         modifier = Modifier
@@ -590,182 +701,329 @@ private fun ServiceCardItem(
                         AccountStatusBadge(status = entry.serviceAccount.status)
                     }
                 }
+                if (entries.size > 3) {
+                    Text(
+                        text = "View all ${entries.size} entries on Service page →",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
             }
         }
     }
 }
 
+/**
+ * Dedicated Full-Screen Service Detail Page replacing the old cramped ServiceDetailModal AlertDialog.
+ * Features a hero service header, proportional compact "+ Add Entry" pill button, and rich entry cards.
+ */
 @Composable
-private fun ServiceDetailModal(
+private fun ServiceDetailPage(
     serviceWithCount: ServiceWithCount,
     serviceAccounts: List<ServiceAccountWithDetails>,
-    onDismiss: () -> Unit,
+    onBack: () -> Unit,
     onEditService: () -> Unit,
     onToggleArchiveService: () -> Unit,
+    onDeleteService: () -> Unit,
     onAddServiceAccount: () -> Unit,
     onViewServiceAccount: (ServiceAccountWithDetails) -> Unit,
     onEditServiceAccount: (ServiceAccountWithDetails) -> Unit,
     onDeleteServiceAccount: (ServiceAccountWithDetails) -> Unit
 ) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
+    FullScreenSubpageScaffold(
+        title = serviceWithCount.service.name,
+        subtitle = "${serviceAccounts.size} service account entry(s)",
+        onBack = onBack,
+        backButtonTestTag = "service_detail_back_button",
+        actions = {
+            OutlinedButton(
+                onClick = onToggleArchiveService,
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                shape = RoundedCornerShape(10.dp)
             ) {
-                ServiceLogoFrame(
-                    serviceName = serviceWithCount.service.name,
-                    asset = serviceWithCount.iconAsset,
-                    size = 44.dp
+                Icon(
+                    imageVector = if (serviceWithCount.service.isArchived) Icons.Default.Unarchive else Icons.Default.Archive,
+                    contentDescription = null,
+                    modifier = Modifier.size(15.dp)
                 )
-                Column {
-                    Text(serviceWithCount.service.name, fontWeight = FontWeight.Bold)
-                    Text(
-                        text = "${serviceAccounts.size} service account entry(s)",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.primary
-                    )
+                Spacer(Modifier.width(4.dp))
+                Text(
+                    text = if (serviceWithCount.service.isArchived) "Unarchive" else "Archive",
+                    style = MaterialTheme.typography.labelMedium
+                )
+            }
+            OutlinedButton(
+                onClick = onEditService,
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.testTag("service_detail_edit_button")
+            ) {
+                Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(15.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("Edit", style = MaterialTheme.typography.labelMedium)
+            }
+        }
+    ) {
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .testTag("service_detail_page"),
+            contentPadding = PaddingValues(16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            // Service Hero Card
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(18.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f))
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(18.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(14.dp)
+                        ) {
+                            ServiceLogoFrame(
+                                serviceName = serviceWithCount.service.name,
+                                asset = serviceWithCount.iconAsset,
+                                size = 58.dp
+                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Text(
+                                        text = serviceWithCount.service.name,
+                                        style = MaterialTheme.typography.titleLarge,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    if (serviceWithCount.service.isArchived) {
+                                        Surface(
+                                            shape = RoundedCornerShape(6.dp),
+                                            color = MaterialTheme.colorScheme.tertiaryContainer
+                                        ) {
+                                            Text(
+                                                text = "Archived",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                                if (!serviceWithCount.service.websiteUrl.isNullOrBlank()) {
+                                    Text(
+                                        text = serviceWithCount.service.websiteUrl,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontFamily = JetBrainsMonoFontFamily,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                                Text(
+                                    text = "${serviceWithCount.activeAccountCount} active • ${serviceAccounts.size} total entry(s)",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+
+                        if (!serviceWithCount.service.description.isNullOrBlank()) {
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+                            Text(
+                                text = serviceWithCount.service.description,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
                 }
             }
-        },
-        text = {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                if (!serviceWithCount.service.websiteUrl.isNullOrBlank()) {
-                    Text(
-                        text = "Website: ${serviceWithCount.service.websiteUrl}",
-                        style = MaterialTheme.typography.bodySmall,
-                        fontFamily = JetBrainsMonoFontFamily
-                    )
-                }
-                if (!serviceWithCount.service.description.isNullOrBlank()) {
-                    Text(
-                        text = serviceWithCount.service.description,
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                }
 
+            // Section Header with sleek compact "+ Add Entry" button
+            item {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = "Service Accounts",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Button(
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Service Account Entries",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "Tap an entry to view credentials & notes, or add a new account",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                    FilledTonalButton(
                         onClick = onAddServiceAccount,
+                        shape = RoundedCornerShape(10.dp),
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
                         modifier = Modifier.testTag("service_detail_add_entry_button")
                     ) {
-                        Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("Add Service Account")
+                        Icon(
+                            imageVector = Icons.Default.PersonAdd,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            text = "Add Account",
+                            style = MaterialTheme.typography.labelLarge
+                        )
                     }
                 }
+            }
 
-                if (serviceAccounts.isEmpty()) {
-                    Text(
-                        text = "No service accounts created for ${serviceWithCount.service.name} yet. Tap 'Add Service Account' to link an existing standalone Account or add a custom service username/email.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+            if (serviceAccounts.isEmpty()) {
+                item {
+                    EmptyStateCard(
+                        icon = Icons.Default.PersonAdd,
+                        title = "No Accounts in ${serviceWithCount.service.name} Yet",
+                        body = "Link one of your existing standalone Accounts or add a service-specific username/email with its own optional encrypted password.",
+                        actionLabel = "Add First Service Account",
+                        actionTestTag = "service_detail_empty_add_button",
+                        onActionClick = onAddServiceAccount
                     )
-                } else {
-                    serviceAccounts.forEach { entry ->
-                        Surface(
-                            shape = MaterialTheme.shapes.small,
-                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)),
+                }
+            } else {
+                items(serviceAccounts, key = { it.serviceAccount.id }) { entry ->
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onViewServiceAccount(entry) }
+                            .testTag("service_entry_card_${entry.serviceAccount.displayName}"),
+                        shape = RoundedCornerShape(14.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.32f))
+                    ) {
+                        Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clickable { onViewServiceAccount(entry) }
+                                .padding(14.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(10.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                    ) {
-                                        Text(
-                                            text = entry.serviceAccount.displayName,
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            fontWeight = FontWeight.SemiBold
-                                        )
-                                        AccountStatusBadge(
-                                            status = entry.serviceAccount.status,
-                                            isArchived = entry.serviceAccount.isArchived
-                                        )
-                                    }
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
                                     Text(
-                                        text = entry.effectiveIdentifier,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        fontFamily = JetBrainsMonoFontFamily,
-                                        color = MaterialTheme.colorScheme.primary
+                                        text = entry.serviceAccount.displayName,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.SemiBold
                                     )
-                                    Text(
-                                        text = if (entry.linkedAccount != null) {
-                                            "Linked to Standalone Account: ${entry.linkedAccount.displayName}"
-                                        } else {
-                                            "Unlinked service-specific account"
-                                        },
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    AccountStatusBadge(
+                                        status = entry.serviceAccount.status,
+                                        isArchived = entry.serviceAccount.isArchived
                                     )
+                                    entry.category?.let { CategoryBadgeChip(categoryName = it.name) }
                                 }
-                                Row {
-                                    IconButton(onClick = { onEditServiceAccount(entry) }) {
-                                        Icon(Icons.Default.Edit, contentDescription = "Edit entry")
-                                    }
-                                    IconButton(onClick = { onDeleteServiceAccount(entry) }) {
+                                Text(
+                                    text = entry.effectiveIdentifier,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontFamily = JetBrainsMonoFontFamily,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    if (entry.linkedAccount != null) {
                                         Icon(
-                                            Icons.Default.Delete,
-                                            contentDescription = "Delete entry",
-                                            tint = MaterialTheme.colorScheme.error
+                                            imageVector = Icons.Default.Link,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(13.dp)
+                                        )
+                                        Text(
+                                            text = "Linked: ${entry.linkedAccount.displayName}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    } else {
+                                        Text(
+                                            text = "Custom Service Account",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
                                     }
+                                    if (entry.serviceAccount.hasPassword || entry.linkedAccount?.hasPassword == true) {
+                                        Icon(
+                                            imageVector = Icons.Default.Key,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(13.dp)
+                                        )
+                                        Text(
+                                            text = "Password Saved",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+                                }
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                IconButton(onClick = { onEditServiceAccount(entry) }) {
+                                    Icon(Icons.Default.Edit, contentDescription = "Edit entry")
+                                }
+                                IconButton(onClick = { onDeleteServiceAccount(entry) }) {
+                                    Icon(
+                                        Icons.Default.Delete,
+                                        contentDescription = "Delete entry",
+                                        tint = MaterialTheme.colorScheme.error
+                                    )
                                 }
                             }
                         }
                     }
                 }
             }
-        },
-        confirmButton = {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = onToggleArchiveService) {
-                    Text(if (serviceWithCount.service.isArchived) "Unarchive" else "Archive")
+
+            item {
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = onDeleteService,
+                    colors = androidx.compose.material3.ButtonDefaults.outlinedButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error
+                    ),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.45f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Remove or Reassign Service")
                 }
-                Button(onClick = onEditService) {
-                    Text("Edit Service")
-                }
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Close")
             }
         }
-    )
+    }
 }
 
+/**
+ * Full-screen Service Account Add / Edit Page replacing the old AlertDialog.
+ * Never pre-fills or exposes an existing saved password when editing.
+ */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ServiceAccountEditorDialog(
     serviceWithCount: ServiceWithCount,
     initialEntry: ServiceAccountWithDetails?,
-    initialDecryptedPassword: String,
     standaloneAccounts: List<AccountWithDetails>,
     categories: List<CategoryWithCount>,
     onDismiss: () -> Unit,
@@ -775,6 +1033,7 @@ fun ServiceAccountEditorDialog(
         email: String?,
         username: String?,
         password: String?,
+        clearSavedPassword: Boolean,
         categoryId: String?,
         purpose: String?,
         recoveryEmailReference: String?,
@@ -785,6 +1044,8 @@ fun ServiceAccountEditorDialog(
         onError: (String) -> Unit
     ) -> Unit
 ) {
+    val hasExistingSavedPassword = initialEntry?.serviceAccount?.hasPassword == true
+
     var useLinkedAccount by rememberSaveable {
         mutableStateOf(initialEntry?.serviceAccount?.linkedAccountId != null)
     }
@@ -803,7 +1064,9 @@ fun ServiceAccountEditorDialog(
     var username by rememberSaveable {
         mutableStateOf(initialEntry?.serviceAccount?.username.orEmpty())
     }
-    var password by rememberSaveable { mutableStateOf(initialDecryptedPassword) }
+    // Security rule: NEVER load or pre-fill an existing saved password into the edit text field
+    var password by rememberSaveable { mutableStateOf("") }
+    var clearSavedPassword by rememberSaveable { mutableStateOf(false) }
     var selectedCategoryId by rememberSaveable {
         mutableStateOf(initialEntry?.serviceAccount?.categoryId)
     }
@@ -825,33 +1088,92 @@ fun ServiceAccountEditorDialog(
     var notes by rememberSaveable {
         mutableStateOf(initialEntry?.serviceAccount?.notes.orEmpty())
     }
-    var status by rememberSaveable {
-        mutableStateOf(initialEntry?.serviceAccount?.status ?: AccountStatus.ACTIVE)
+    var statusName by rememberSaveable {
+        mutableStateOf((initialEntry?.serviceAccount?.status ?: AccountStatus.ACTIVE).name)
+    }
+    val status = remember(statusName) {
+        AccountStatus.entries.firstOrNull { it.name == statusName } ?: AccountStatus.ACTIVE
     }
     var errorMessage by remember { mutableStateOf<String?>(null) }
 
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = {
-            Text(
-                if (initialEntry == null) {
-                    "Add Account Entry for ${serviceWithCount.service.name}"
-                } else {
-                    "Edit ${serviceWithCount.service.name} Entry"
-                }
-            )
+    val triggerSave: () -> Unit = {
+        val linkedId = if (useLinkedAccount) selectedLinkedAccountId else null
+        onSave(
+            linkedId,
+            displayName,
+            email.takeIf { it.isNotBlank() },
+            username.takeIf { it.isNotBlank() },
+            password.takeIf { it.isNotBlank() },
+            clearSavedPassword,
+            selectedCategoryId,
+            purpose.takeIf { it.isNotBlank() },
+            recoveryEmail.takeIf { it.isNotBlank() },
+            recoveryPhone.takeIf { it.isNotBlank() },
+            websiteUrl.takeIf { it.isNotBlank() },
+            notes.takeIf { it.isNotBlank() },
+            status
+        ) { err ->
+            errorMessage = err
+        }
+    }
+
+    FullScreenSubpageScaffold(
+        title = if (initialEntry == null) {
+            "Add Account to ${serviceWithCount.service.name}"
+        } else {
+            "Edit ${serviceWithCount.service.name} Entry"
         },
-        text = {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
+        subtitle = if (initialEntry == null) {
+            "Link a standalone account or create a service-specific credential"
+        } else {
+            "Updating ${initialEntry.serviceAccount.displayName}"
+        },
+        onBack = onDismiss,
+        backButtonTestTag = "service_account_editor_back_button",
+        actions = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+            Button(
+                onClick = triggerSave,
+                shape = RoundedCornerShape(10.dp),
+                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+                modifier = Modifier.testTag("save_service_account_button")
             ) {
-                Text(
-                    text = "Account Connection Mode",
-                    style = MaterialTheme.typography.labelLarge
-                )
+                Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("Save Entry")
+            }
+        }
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            if (errorMessage != null) {
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = errorMessage!!,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        modifier = Modifier.padding(12.dp)
+                    )
+                }
+            }
+
+            FormSectionCard(
+                title = "Account Connection Mode",
+                subtitle = "Choose whether this service uses a standalone Account or a custom service login",
+                icon = Icons.Default.Link
+            ) {
                 FlowRow(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
@@ -904,7 +1226,13 @@ fun ServiceAccountEditorDialog(
                         }
                     }
                 }
+            }
 
+            FormSectionCard(
+                title = "Service Entry Identity",
+                subtitle = "Label and username or email for ${serviceWithCount.service.name}",
+                icon = Icons.Default.Person
+            ) {
                 OutlinedTextField(
                     value = displayName,
                     onValueChange = {
@@ -953,19 +1281,40 @@ fun ServiceAccountEditorDialog(
                             .testTag("service_account_email_input")
                     )
                 }
+            }
 
+            FormSectionCard(
+                title = "Service Password Manager (Optional)",
+                subtitle = if (hasExistingSavedPassword) {
+                    "Existing service password stays hidden and safe. Leave blank to keep it unchanged."
+                } else if (useLinkedAccount) {
+                    "Leave blank to inherit the linked standalone Account's password, or set a service-specific password"
+                } else {
+                    "Optional service-specific password encrypted with AES-256-GCM"
+                },
+                icon = Icons.Default.Key
+            ) {
                 PasswordManagerFieldEditor(
                     password = password,
                     onPasswordChange = { password = it },
                     label = if (useLinkedAccount) {
-                        "Service-Specific Password (Optional — leave blank to use linked account's)"
+                        "Service-Specific Password"
                     } else {
-                        "Service Password (Optional, Encrypted)"
+                        "Service Password (Encrypted)"
                     },
                     isOptional = true,
+                    hasExistingSavedPassword = hasExistingSavedPassword,
+                    clearSavedPassword = clearSavedPassword,
+                    onClearSavedPasswordChange = { clearSavedPassword = it },
                     testTag = "service_account_password_input"
                 )
+            }
 
+            FormSectionCard(
+                title = "Classification & Details",
+                subtitle = "Status, category, and recovery details",
+                icon = Icons.Default.Folder
+            ) {
                 OutlinedTextField(
                     value = purpose,
                     onValueChange = { purpose = it },
@@ -985,7 +1334,7 @@ fun ServiceAccountEditorDialog(
                     AccountStatus.entries.forEach { option ->
                         FilterChip(
                             selected = status == option,
-                            onClick = { status = option },
+                            onClick = { statusName = option.name },
                             label = { Text(option.displayLabel) }
                         )
                     }
@@ -1048,207 +1397,272 @@ fun ServiceAccountEditorDialog(
                         .fillMaxWidth()
                         .testTag("service_account_notes_input")
                 )
+            }
 
-                if (errorMessage != null) {
-                    Text(
-                        text = errorMessage!!,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error
-                    )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                OutlinedButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("Cancel")
+                }
+                Button(
+                    onClick = triggerSave,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Save Entry")
                 }
             }
-        },
-        confirmButton = {
-            Button(
-                onClick = {
-                    val linkedId = if (useLinkedAccount) selectedLinkedAccountId else null
-                    onSave(
-                        linkedId,
-                        displayName,
-                        email.takeIf { it.isNotBlank() },
-                        username.takeIf { it.isNotBlank() },
-                        password.takeIf { it.isNotBlank() },
-                        selectedCategoryId,
-                        purpose.takeIf { it.isNotBlank() },
-                        recoveryEmail.takeIf { it.isNotBlank() },
-                        recoveryPhone.takeIf { it.isNotBlank() },
-                        websiteUrl.takeIf { it.isNotBlank() },
-                        notes.takeIf { it.isNotBlank() },
-                        status
-                    ) { err ->
-                        errorMessage = err
-                    }
-                },
-                modifier = Modifier.testTag("save_service_account_button")
-            ) {
-                Text("Save Entry")
-            }
-        },
-        dismissButton = {
-            OutlinedButton(onClick = onDismiss) {
-                Text("Cancel")
-            }
         }
-    )
+    }
 }
 
+/**
+ * Full-screen Service Account Entry Detail Page replacing the old AlertDialog.
+ */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun ServiceAccountDetailDialog(
+private fun ServiceAccountDetailPage(
     item: ServiceAccountWithDetails,
     onDecryptSecret: (String?) -> String?,
     onRequestVerifiedAction: (onVerified: () -> Unit) -> Unit,
-    onDismiss: () -> Unit,
+    onBack: () -> Unit,
     onEdit: () -> Unit,
-    onToggleArchive: () -> Unit
+    onToggleArchive: () -> Unit,
+    onDelete: () -> Unit
 ) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
+    FullScreenSubpageScaffold(
+        title = item.serviceAccount.displayName,
+        subtitle = "${item.service.name} • ${item.effectiveIdentifier}",
+        onBack = onBack,
+        backButtonTestTag = "service_account_detail_back_button",
+        actions = {
+            OutlinedButton(
+                onClick = onToggleArchive,
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                shape = RoundedCornerShape(10.dp)
             ) {
-                ServiceLogoFrame(
-                    serviceName = item.service.name,
-                    asset = item.serviceAsset,
-                    size = 44.dp
+                Icon(
+                    imageVector = if (item.serviceAccount.isArchived) Icons.Default.Unarchive else Icons.Default.Archive,
+                    contentDescription = null,
+                    modifier = Modifier.size(15.dp)
                 )
-                Column {
-                    Text(item.serviceAccount.displayName, fontWeight = FontWeight.Bold)
-                    Text(
-                        text = "${item.service.name} • ${item.effectiveIdentifier}",
-                        style = MaterialTheme.typography.bodySmall,
-                        fontFamily = JetBrainsMonoFontFamily,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                }
+                Spacer(Modifier.width(4.dp))
+                Text(
+                    text = if (item.serviceAccount.isArchived) "Unarchive" else "Archive",
+                    style = MaterialTheme.typography.labelMedium
+                )
             }
-        },
-        text = {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+            Button(
+                onClick = onEdit,
+                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.testTag("service_account_detail_edit_button")
             ) {
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(15.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("Edit", style = MaterialTheme.typography.labelMedium)
+            }
+        }
+    ) {
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .testTag("service_account_detail_page"),
+            contentPadding = PaddingValues(16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(18.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f))
                 ) {
-                    AccountStatusBadge(
-                        status = item.serviceAccount.status,
-                        isArchived = item.serviceAccount.isArchived
-                    )
-                    item.category?.let { CategoryBadgeChip(categoryName = it.name) }
-                }
-
-                item.linkedAccount?.let { linked ->
-                    Surface(
-                        shape = MaterialTheme.shapes.small,
-                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f),
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)),
-                        modifier = Modifier.fillMaxWidth()
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(18.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(10.dp),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            horizontalArrangement = Arrangement.spacedBy(14.dp)
                         ) {
-                            AccountAvatarFrame(
-                                displayName = linked.displayName,
-                                identifier = linked.primaryIdentifier,
-                                size = 34.dp
+                            ServiceLogoFrame(
+                                serviceName = item.service.name,
+                                asset = item.serviceAsset,
+                                size = 54.dp
                             )
-                            Column {
+                            Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = "Linked Standalone Account",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.primary
+                                    text = item.serviceAccount.displayName,
+                                    style = MaterialTheme.typography.titleLarge,
+                                    fontWeight = FontWeight.Bold
                                 )
                                 Text(
-                                    text = "${linked.displayName} (${linked.primaryIdentifier})",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    fontWeight = FontWeight.SemiBold
+                                    text = "${item.service.name} • ${item.effectiveIdentifier}",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontFamily = JetBrainsMonoFontFamily,
+                                    color = MaterialTheme.colorScheme.primary
                                 )
                             }
                         }
+
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            AccountStatusBadge(
+                                status = item.serviceAccount.status,
+                                isArchived = item.serviceAccount.isArchived
+                            )
+                            item.category?.let { CategoryBadgeChip(categoryName = it.name) }
+                        }
+
+                        item.linkedAccount?.let { linked ->
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.38f),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    AccountAvatarFrame(
+                                        displayName = linked.displayName,
+                                        identifier = linked.primaryIdentifier,
+                                        size = 36.dp
+                                    )
+                                    Column {
+                                        Text(
+                                            text = "Linked Standalone Account",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                        Text(
+                                            text = "${linked.displayName} (${linked.primaryIdentifier})",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.22f))
+
+                        if (!item.effectiveEmail.isNullOrBlank()) {
+                            Text(
+                                text = "Email: ${item.effectiveEmail}",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontFamily = JetBrainsMonoFontFamily
+                            )
+                        }
+                        if (!item.effectiveUsername.isNullOrBlank()) {
+                            Text(
+                                text = "Username: ${item.effectiveUsername}",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontFamily = JetBrainsMonoFontFamily
+                            )
+                        }
+                        if (!item.serviceAccount.purpose.isNullOrBlank()) {
+                            Text(
+                                text = "Purpose: ${item.serviceAccount.purpose}",
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        }
+                        if (!item.serviceAccount.websiteUrl.isNullOrBlank()) {
+                            Text(
+                                text = "Login URL: ${item.serviceAccount.websiteUrl}",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = JetBrainsMonoFontFamily,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
                     }
                 }
+            }
 
-                if (!item.effectiveEmail.isNullOrBlank()) {
-                    Text(
-                        text = "Email: ${item.effectiveEmail}",
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontFamily = JetBrainsMonoFontFamily
-                    )
-                }
-                if (!item.effectiveUsername.isNullOrBlank()) {
-                    Text(
-                        text = "Username: ${item.effectiveUsername}",
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontFamily = JetBrainsMonoFontFamily
-                    )
-                }
-                if (!item.serviceAccount.purpose.isNullOrBlank()) {
-                    Text(
-                        text = "Purpose: ${item.serviceAccount.purpose}",
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                }
-
+            item {
                 val hasOwnPassword = item.serviceAccount.hasPassword
                 val hasLinkedPassword = item.linkedAccount?.hasPassword == true
 
-                ProtectedVaultFieldCard(
-                    label = if (hasOwnPassword) {
-                        "Service Account Password"
+                FormSectionCard(
+                    title = "Password Manager Vault",
+                    subtitle = "Verify your identity to reveal or copy credentials and protected notes",
+                    icon = Icons.Default.Lock
+                ) {
+                    if (!hasOwnPassword && !hasLinkedPassword && !item.serviceAccount.hasNotes) {
+                        Text(
+                            text = "No password or protected notes saved for this entry.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     } else {
-                        "Linked Account Password"
-                    },
-                    hasValue = hasOwnPassword || hasLinkedPassword,
-                    onDecryptValue = {
-                        val cipher = if (hasOwnPassword) {
-                            item.serviceAccount.encryptedPassword
-                        } else {
-                            item.linkedAccount?.encryptedPassword
-                        }
-                        onDecryptSecret(cipher)
-                    },
-                    onRequestVerifiedAction = onRequestVerifiedAction,
-                    testTagPrefix = "service_account_password_${item.serviceAccount.id}",
-                    isMonospace = true
-                )
+                        ProtectedVaultFieldCard(
+                            label = if (hasOwnPassword) {
+                                "Service Account Password"
+                            } else {
+                                "Linked Account Password"
+                            },
+                            hasValue = hasOwnPassword || hasLinkedPassword,
+                            onDecryptValue = {
+                                val cipher = if (hasOwnPassword) {
+                                    item.serviceAccount.encryptedPassword
+                                } else {
+                                    item.linkedAccount?.encryptedPassword
+                                }
+                                onDecryptSecret(cipher)
+                            },
+                            onRequestVerifiedAction = onRequestVerifiedAction,
+                            testTagPrefix = "service_account_password_${item.serviceAccount.id}",
+                            isMonospace = true
+                        )
 
-                ProtectedVaultFieldCard(
-                    label = "Protected Notes",
-                    hasValue = item.serviceAccount.hasNotes,
-                    onDecryptValue = { item.serviceAccount.notes },
-                    onRequestVerifiedAction = onRequestVerifiedAction,
-                    testTagPrefix = "service_account_notes_${item.serviceAccount.id}",
-                    isMonospace = false
-                )
-            }
-        },
-        confirmButton = {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = onToggleArchive) {
-                    Text(if (item.serviceAccount.isArchived) "Unarchive" else "Archive")
-                }
-                Button(onClick = onEdit) {
-                    Text("Edit")
+                        ProtectedVaultFieldCard(
+                            label = "Protected Notes",
+                            hasValue = item.serviceAccount.hasNotes,
+                            onDecryptValue = { item.serviceAccount.notes },
+                            onRequestVerifiedAction = onRequestVerifiedAction,
+                            testTagPrefix = "service_account_notes_${item.serviceAccount.id}",
+                            isMonospace = false
+                        )
+                    }
                 }
             }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Close")
+
+            item {
+                OutlinedButton(
+                    onClick = onDelete,
+                    colors = androidx.compose.material3.ButtonDefaults.outlinedButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error
+                    ),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.45f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Delete Service Account Entry")
+                }
             }
         }
-    )
+    }
 }
 
+/**
+ * Full-screen Service Create / Edit Page replacing the old AlertDialog.
+ */
 @Composable
 fun ServiceEditorDialog(
     initialService: ServiceWithCount?,
@@ -1289,68 +1703,92 @@ fun ServiceEditorDialog(
         }
     }
 
-    AlertDialog(
-        onDismissRequest = {
-            onCancelWebsiteLogoFetch()
-            onDismiss()
+    val handleDismiss: () -> Unit = {
+        onCancelWebsiteLogoFetch()
+        onDismiss()
+    }
+
+    val triggerSave: () -> Unit = {
+        onSave(
+            initialService?.service?.id,
+            name,
+            websiteUrl.takeIf { it.isNotBlank() },
+            description.takeIf { it.isNotBlank() },
+            currentAsset?.id
+        ) { err ->
+            errorMessage = err
+        }
+    }
+
+    FullScreenSubpageScaffold(
+        title = if (initialService == null) "Create Service" else "Edit Service",
+        subtitle = if (initialService == null) {
+            "Define a service with a custom or website-fetched logo"
+        } else {
+            "Updating ${initialService.service.name}"
         },
-        title = { Text(if (initialService == null) "Create Service" else "Edit Service") },
-        text = {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
+        onBack = handleDismiss,
+        backButtonTestTag = "service_editor_back_button",
+        actions = {
+            TextButton(onClick = handleDismiss) {
+                Text("Cancel")
+            }
+            Button(
+                onClick = triggerSave,
+                shape = RoundedCornerShape(10.dp),
+                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+                modifier = Modifier.testTag("save_service_button")
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("Save Service")
+            }
+        }
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            if (errorMessage != null) {
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer
+                    ),
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    ServiceLogoFrame(
-                        serviceName = name.ifBlank { "Service" },
-                        asset = currentAsset,
-                        size = 56.dp
+                    Text(
+                        text = errorMessage!!,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        modifier = Modifier.padding(12.dp)
                     )
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "Service Logo",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Text(
-                            text = "Pick an image from device or fetch directly from the website HTTPS URL.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
                 }
+            }
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+            if (statusMessage != null) {
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
+                    ),
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    OutlinedButton(
-                        onClick = {
-                            photoPickerLauncher.launch(
-                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                            )
-                        },
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("pick_service_logo_button")
-                    ) {
-                        Icon(Icons.Default.Image, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("Pick Image")
-                    }
-
-                    if (currentAsset != null) {
-                        TextButton(onClick = { currentAsset = null }) {
-                            Text("Clear Logo")
-                        }
-                    }
+                    Text(
+                        text = statusMessage!!,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        modifier = Modifier.padding(12.dp)
+                    )
                 }
+            }
 
+            FormSectionCard(
+                title = "Service Identity & Website",
+                subtitle = "Service name, HTTPS URL, and optional description",
+                icon = Icons.Default.Apps
+            ) {
                 OutlinedTextField(
                     value = name,
                     onValueChange = {
@@ -1377,43 +1815,6 @@ fun ServiceEditorDialog(
                         .testTag("service_website_input")
                 )
 
-                OutlinedButton(
-                    onClick = {
-                        isFetchingLogo = true
-                        errorMessage = null
-                        statusMessage = null
-                        onFetchWebsiteLogo(
-                            websiteUrl,
-                            { fetched ->
-                                isFetchingLogo = false
-                                currentAsset = fetched.asset
-                                if (websiteUrl.isBlank()) {
-                                    websiteUrl = fetched.normalizedWebsiteUrl
-                                }
-                                statusMessage = "Fetched logo from ${fetched.sourceHost}"
-                            },
-                            { err ->
-                                isFetchingLogo = false
-                                errorMessage = err
-                            }
-                        )
-                    },
-                    enabled = websiteUrl.isNotBlank() && !isFetchingLogo,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("fetch_website_logo_button")
-                ) {
-                    if (isFetchingLogo) {
-                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                        Spacer(Modifier.width(8.dp))
-                        Text("Fetching Website Logo...")
-                    } else {
-                        Icon(Icons.Default.CloudDownload, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text("Fetch Logo from URL")
-                    }
-                }
-
                 OutlinedTextField(
                     value = description,
                     onValueChange = { description = it },
@@ -1423,53 +1824,126 @@ fun ServiceEditorDialog(
                         .fillMaxWidth()
                         .testTag("service_description_input")
                 )
-
-                if (statusMessage != null) {
-                    Text(
-                        text = statusMessage!!,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                }
-
-                if (errorMessage != null) {
-                    Text(
-                        text = errorMessage!!,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error
-                    )
-                }
             }
-        },
-        confirmButton = {
-            Button(
-                onClick = {
-                    onSave(
-                        initialService?.service?.id,
-                        name,
-                        websiteUrl.takeIf { it.isNotBlank() },
-                        description.takeIf { it.isNotBlank() },
-                        currentAsset?.id
-                    ) { err ->
-                        errorMessage = err
+
+            FormSectionCard(
+                title = "Service Logo",
+                subtitle = "Fetch the official icon directly from the website URL or upload an image",
+                icon = Icons.Default.Image
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    ServiceLogoFrame(
+                        serviceName = name.ifBlank { "Service" },
+                        asset = currentAsset,
+                        size = 64.dp
+                    )
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = if (currentAsset != null) "Custom Logo Attached" else "Monogram Fallback Active",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = "Logos are sanitized, re-encoded to PNG, and stored offline inside encrypted app storage.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
-                },
-                modifier = Modifier.testTag("save_service_button")
-            ) {
-                Text("Save Service")
-            }
-        },
-        dismissButton = {
-            OutlinedButton(
-                onClick = {
-                    onCancelWebsiteLogoFetch()
-                    onDismiss()
                 }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    FilledTonalButton(
+                        onClick = {
+                            isFetchingLogo = true
+                            errorMessage = null
+                            statusMessage = null
+                            onFetchWebsiteLogo(
+                                websiteUrl,
+                                { fetched ->
+                                    isFetchingLogo = false
+                                    currentAsset = fetched.asset
+                                    if (websiteUrl.isBlank()) {
+                                        websiteUrl = fetched.normalizedWebsiteUrl
+                                    }
+                                    statusMessage = "Fetched logo from ${fetched.sourceHost}"
+                                },
+                                { err ->
+                                    isFetchingLogo = false
+                                    errorMessage = err
+                                }
+                            )
+                        },
+                        enabled = websiteUrl.isNotBlank() && !isFetchingLogo,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("fetch_website_logo_button")
+                    ) {
+                        if (isFetchingLogo) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(6.dp))
+                            Text("Fetching...")
+                        } else {
+                            Icon(Icons.Default.CloudDownload, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Fetch Logo from URL")
+                        }
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            runCatching {
+                                photoPickerLauncher.launch(
+                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                )
+                            }.onFailure {
+                                errorMessage = "System photo picker is unavailable on this device. Try 'Fetch Logo from URL'."
+                            }
+                        },
+                        modifier = Modifier.testTag("pick_service_logo_button")
+                    ) {
+                        Icon(Icons.Default.Image, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Pick Image")
+                    }
+                }
+
+                if (currentAsset != null) {
+                    TextButton(onClick = { currentAsset = null }) {
+                        Text("Clear Custom Logo")
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                Text("Cancel")
+                OutlinedButton(
+                    onClick = handleDismiss,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("Cancel")
+                }
+                Button(
+                    onClick = triggerSave,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Save Service")
+                }
             }
         }
-    )
+    }
 }
 
 @Composable
