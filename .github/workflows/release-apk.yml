@@ -84,6 +84,15 @@ jobs:
             exit 1
           fi
 
+      - name: Diagnose Build Environment
+        shell: bash
+        run: |
+          echo "Java version: $(java -version 2>&1)"
+          echo "Gradle version: $(gradle --version 2>&1 | head -5)"
+          echo "ANDROID_HOME: $ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT: $ANDROID_SDK_ROOT"
+          ls -la "$ANDROID_HOME/build-tools/" 2>/dev/null || echo "No build-tools dir"
+
       - name: Build Signed Release APK
         env:
           KEYSTORE_PATH: "${GITHUB_WORKSPACE}/my-upload-key.jks"
@@ -91,7 +100,7 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         shell: bash
         run: |
-          gradle :app:assembleRelease --no-daemon --no-configuration-cache
+          gradle :app:assembleRelease --no-daemon --no-configuration-cache --stacktrace --info
 
       - name: Verify Signed APK Exists
         shell: bash
