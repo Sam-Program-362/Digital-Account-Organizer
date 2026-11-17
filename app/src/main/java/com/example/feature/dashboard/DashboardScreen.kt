@@ -22,8 +22,10 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Backup
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -44,6 +46,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.R
+import com.example.core.designsystem.AccountAvatarFrame
 import com.example.core.designsystem.AccountStatusBadge
 import com.example.core.designsystem.CategoryBadgeChip
 import com.example.core.designsystem.EmptyStateCard
@@ -57,9 +60,13 @@ import com.example.domain.model.DashboardSummary
 fun DashboardScreen(
     summary: DashboardSummary,
     isAppLockEnabled: Boolean,
+    showInitialLockSuggestion: Boolean = false,
+    onKeepDeviceVaultLock: () -> Unit = {},
+    onOpenSecuritySettings: () -> Unit = {},
+    onSkipAllLocks: () -> Unit = {},
     onCreateServiceClick: () -> Unit,
     onAddAccountClick: () -> Unit,
-    onOpenAccountsForService: (String) -> Unit,
+    onOpenServiceDetail: (String) -> Unit,
     onOpenAccountsForCategory: (String) -> Unit,
     onOpenAllAccounts: () -> Unit,
     onOpenBackup: () -> Unit,
@@ -76,6 +83,70 @@ fun DashboardScreen(
             OfflinePrivacyBanner(
                 noticeText = stringResource(R.string.offline_organizer_notice)
             )
+        }
+
+        // First-run optional security suggestion card (can be skipped so no locks or recovery codes are forced)
+        if (showInitialLockSuggestion && !isAppLockEnabled) {
+            item {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("initial_lock_suggestion_card"),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.4f)
+                    ),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.5f))
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.Shield,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                text = "Choose Your Password & App Lock Preference",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                        Text(
+                            text = "Browsing your Accounts and Services is always fast and uninterrupted. By default, revealing or copying saved passwords & notes asks for your Device Lock (once per 5 minutes). You can also set an 8+ character Master Password or continue with no lock at all.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Button(
+                                onClick = onKeepDeviceVaultLock,
+                                modifier = Modifier.testTag("suggestion_keep_device_lock_button")
+                            ) {
+                                Text("Use Device Lock for Passwords")
+                            }
+                            OutlinedButton(
+                                onClick = onOpenSecuritySettings,
+                                modifier = Modifier.testTag("suggestion_setup_master_password_button")
+                            ) {
+                                Text("Set Master Password")
+                            }
+                            TextButton(
+                                onClick = onSkipAllLocks,
+                                modifier = Modifier.testTag("suggestion_skip_all_locks_button")
+                            ) {
+                                Text("No Lock (Skip)")
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Summary metrics grid
@@ -120,7 +191,7 @@ fun DashboardScreen(
                     onClick = onOpenAllAccounts
                 )
                 MetricStatCard(
-                    label = "Archived Records",
+                    label = "Archived Accounts",
                     count = summary.totalArchivedAccounts,
                     icon = Icons.Default.Backup,
                     modifier = Modifier
@@ -155,20 +226,20 @@ fun DashboardScreen(
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Button(
-                            onClick = onCreateServiceClick,
-                            modifier = Modifier.testTag("quick_action_create_service")
-                        ) {
-                            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text(stringResource(R.string.action_create_service))
-                        }
-                        FilledTonalButton(
                             onClick = onAddAccountClick,
                             modifier = Modifier.testTag("quick_action_add_account")
                         ) {
                             Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(Modifier.width(6.dp))
                             Text(stringResource(R.string.action_add_account))
+                        }
+                        FilledTonalButton(
+                            onClick = onCreateServiceClick,
+                            modifier = Modifier.testTag("quick_action_create_service")
+                        ) {
+                            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(stringResource(R.string.action_create_service))
                         }
                         OutlinedButton(
                             onClick = onOpenBackup,
@@ -198,7 +269,7 @@ fun DashboardScreen(
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        text = "Browse by Service",
+                        text = "Browse Services",
                         style = MaterialTheme.typography.titleMedium,
                         color = MaterialTheme.colorScheme.onBackground
                     )
@@ -208,7 +279,7 @@ fun DashboardScreen(
                     ) {
                         summary.topServices.forEach { svcWithCount ->
                             AssistChip(
-                                onClick = { onOpenAccountsForService(svcWithCount.service.id) },
+                                onClick = { onOpenServiceDetail(svcWithCount.service.id) },
                                 label = {
                                     Text("${svcWithCount.service.name} (${svcWithCount.activeAccountCount})")
                                 },
@@ -230,7 +301,7 @@ fun DashboardScreen(
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        text = "Browse by Category",
+                        text = "Browse Accounts by Category",
                         style = MaterialTheme.typography.titleMedium,
                         color = MaterialTheme.colorScheme.onBackground
                     )
@@ -258,25 +329,16 @@ fun DashboardScreen(
             }
         }
 
-        // Recent Accounts or First-Run Empty State
+        // Recent Standalone Accounts or First-Run Empty State
         if (summary.recentAccounts.isEmpty()) {
             item {
-                val needServiceFirst = summary.totalServices == 0
                 EmptyStateCard(
-                    icon = if (needServiceFirst) Icons.Default.Apps else Icons.Default.Person,
-                    title = if (needServiceFirst) {
-                        "Start by Creating Your First Custom Service"
-                    } else {
-                        "No Account Records Yet"
-                    },
-                    body = if (needServiceFirst) {
-                        "Digital Account Organizer never relies on a pre-bundled provider catalogue. Create a custom service (and optional logo) first, then attach as many accounts as you have for that service."
-                    } else {
-                        "You have ${summary.totalServices} custom service(s) ready. Add your first account record to track its label, identifier, category, and purpose."
-                    },
-                    actionLabel = if (needServiceFirst) "Create Custom Service" else "Add First Account",
+                    icon = Icons.Default.Person,
+                    title = "No Standalone Accounts Added Yet",
+                    body = "Add your standalone accounts (such as example123@gmail.com or example321@example.com) with their encrypted passwords and notes. You can also create Services separately and link them to your accounts.",
+                    actionLabel = "Add First Account",
                     actionTestTag = "dashboard_empty_primary_button",
-                    onActionClick = if (needServiceFirst) onCreateServiceClick else onAddAccountClick
+                    onActionClick = onAddAccountClick
                 )
             }
         } else {
@@ -300,7 +362,7 @@ fun DashboardScreen(
             items(summary.recentAccounts, key = { it.account.id }) { item ->
                 RecentAccountRowCard(
                     item = item,
-                    onClick = { onOpenAccountsForService(item.service.id) }
+                    onClick = onOpenAllAccounts
                 )
             }
         }
@@ -371,27 +433,43 @@ private fun RecentAccountRowCard(
                 .padding(14.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            ServiceLogoFrame(
-                serviceName = item.service.name,
-                asset = item.serviceAsset,
+            AccountAvatarFrame(
+                displayName = item.account.displayName,
+                identifier = item.account.email ?: item.account.username,
                 size = 44.dp
             )
             Spacer(modifier = Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = item.account.displayName,
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = item.account.displayName,
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    if (item.account.hasPassword) {
+                        Icon(
+                            imageVector = Icons.Default.Key,
+                            contentDescription = "Password saved",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(15.dp)
+                        )
+                    }
+                }
+                val identifier = item.account.email ?: item.account.username
                 Text(
                     text = buildString {
-                        append(item.service.name)
-                        val identifier = item.account.email ?: item.account.username
                         if (!identifier.isNullOrBlank()) {
-                            append(" • ")
                             append(identifier)
+                        } else {
+                            append("Standalone Account")
+                        }
+                        if (item.linkedServices.isNotEmpty()) {
+                            append(" • Linked to ${item.linkedServices.size} service(s)")
                         }
                     },
                     style = MaterialTheme.typography.bodySmall,

@@ -1,34 +1,30 @@
 package com.example
 
+import android.net.Uri
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Apps
-import androidx.compose.material.icons.filled.Backup
+import androidx.compose.material.icons.filled.CloudQueue
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.outlined.Apps
-import androidx.compose.material.icons.outlined.Backup
-import androidx.compose.material.icons.outlined.Folder
-import androidx.compose.material.icons.outlined.Home
-import androidx.compose.material.icons.outlined.Person
-import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -52,10 +48,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
@@ -64,29 +57,36 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.app.DigitalAccountOrganizerApp
 import com.example.app.OrganizerViewModel
 import com.example.core.security.LockState
+import com.example.domain.model.AccountWithDetails
+import com.example.domain.model.ServiceWithCount
+import com.example.feature.accounts.AccountEditorDialog
 import com.example.feature.accounts.AccountsScreen
 import com.example.feature.backup.BackupScreen
 import com.example.feature.categories.CategoriesScreen
 import com.example.feature.dashboard.DashboardScreen
 import com.example.feature.security.OneTimeRecoveryKeyDialog
 import com.example.feature.security.UnlockScreen
+import com.example.feature.security.VaultVerificationDialog
+import com.example.feature.services.ServiceEditorDialog
 import com.example.feature.services.ServicesScreen
 import com.example.feature.settings.SettingsScreen
 import com.example.ui.theme.DigitalAccountOrganizerTheme
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import javax.crypto.Cipher
 
-enum class OrganizerDestination(
-    val routeId: String,
-    val labelResId: Int,
-    val selectedIcon: ImageVector,
-    val unselectedIcon: ImageVector
+private enum class OrganizerDestination(
+    val label: String,
+    val icon: ImageVector,
+    val testTag: String
 ) {
-    HOME("home", R.string.nav_home, Icons.Filled.Home, Icons.Outlined.Home),
-    ACCOUNTS("accounts", R.string.nav_accounts, Icons.Filled.Person, Icons.Outlined.Person),
-    SERVICES("services", R.string.nav_services, Icons.Filled.Apps, Icons.Outlined.Apps),
-    CATEGORIES("categories", R.string.nav_categories, Icons.Filled.Folder, Icons.Outlined.Folder),
-    BACKUP("backup", R.string.nav_backup, Icons.Filled.Backup, Icons.Outlined.Backup),
-    SETTINGS("settings", R.string.nav_settings, Icons.Filled.Settings, Icons.Outlined.Settings)
+    DASHBOARD("Home", Icons.Default.Home, "nav_home"),
+    ACCOUNTS("Accounts", Icons.Default.AccountCircle, "nav_accounts"),
+    SERVICES("Services", Icons.Default.Apps, "nav_services"),
+    CATEGORIES("Categories", Icons.Default.Folder, "nav_categories"),
+    BACKUP("Backup", Icons.Default.CloudQueue, "nav_backup"),
+    SETTINGS("Settings", Icons.Default.Settings, "nav_settings")
 }
 
 class MainActivity : FragmentActivity() {
@@ -96,21 +96,23 @@ class MainActivity : FragmentActivity() {
         enableEdgeToEdge()
 
         val app = application as DigitalAccountOrganizerApp
+
         setContent {
             val viewModel: OrganizerViewModel = viewModel(
                 factory = OrganizerViewModel.factory(app.container)
             )
+
             val lockState by viewModel.lockState.collectAsStateWithLifecycle()
             val themePreference by viewModel.themePreference.collectAsStateWithLifecycle()
+            val colorPalette by viewModel.colorPalette.collectAsStateWithLifecycle()
 
-            // Apply FLAG_SECURE whenever app protection is enabled or organizer is locked
-            val shouldProtectWindow = when (val state = lockState) {
-                is LockState.Locked -> true
-                is LockState.Unlocked -> state.isAppLockEnabled
-                LockState.Uninitialized -> true
-            }
-            LaunchedEffect(shouldProtectWindow) {
-                if (shouldProtectWindow) {
+            LaunchedEffect(lockState) {
+                val shouldSecureWindow = when (val current = lockState) {
+                    is LockState.Locked -> true
+                    is LockState.Unlocked -> current.isAppLockEnabled || current.isPasswordManagerLockEnabled
+                    else -> false
+                }
+                if (shouldSecureWindow) {
                     window.setFlags(
                         WindowManager.LayoutParams.FLAG_SECURE,
                         WindowManager.LayoutParams.FLAG_SECURE
@@ -120,10 +122,14 @@ class MainActivity : FragmentActivity() {
                 }
             }
 
-            DigitalAccountOrganizerTheme(themePreference = themePreference) {
+            DigitalAccountOrganizerTheme(
+                themePreference = themePreference,
+                colorPalette = colorPalette
+            ) {
                 OrganizerRootContent(
                     activity = this,
-                    viewModel = viewModel
+                    viewModel = viewModel,
+                    lockState = lockState
                 )
             }
         }
@@ -132,183 +138,270 @@ class MainActivity : FragmentActivity() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun OrganizerRootContent(
+private fun OrganizerRootContent(
     activity: FragmentActivity,
-    viewModel: OrganizerViewModel
+    viewModel: OrganizerViewModel,
+    lockState: LockState
 ) {
-    val context = LocalContext.current
-    val lockState by viewModel.lockState.collectAsStateWithLifecycle()
-    val unlockError by viewModel.unlockError.collectAsStateWithLifecycle()
-    val transientMessage by viewModel.transientMessage.collectAsStateWithLifecycle()
-    val oneTimeRecoveryCode by viewModel.oneTimeRecoveryCode.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
 
+    val services by viewModel.services.collectAsStateWithLifecycle()
+    val categories by viewModel.categories.collectAsStateWithLifecycle()
+    val filteredAccounts by viewModel.filteredAccounts.collectAsStateWithLifecycle()
+    val allServiceAccounts by viewModel.allServiceAccounts.collectAsStateWithLifecycle()
+    val dashboardSummary by viewModel.dashboardSummary.collectAsStateWithLifecycle()
+    val filterState by viewModel.filterState.collectAsStateWithLifecycle()
+    val themePreference by viewModel.themePreference.collectAsStateWithLifecycle()
+    val colorPalette by viewModel.colorPalette.collectAsStateWithLifecycle()
+
+    val transientMessage by viewModel.transientMessage.collectAsStateWithLifecycle()
+    val unlockError by viewModel.unlockError.collectAsStateWithLifecycle()
+    val oneTimeRecoveryCode by viewModel.oneTimeRecoveryCode.collectAsStateWithLifecycle()
+    val duplicateServicePrompt by viewModel.duplicateServicePrompt.collectAsStateWithLifecycle()
+    val stagedBackup by viewModel.stagedBackup.collectAsStateWithLifecycle()
+    val conflictResolutions by viewModel.conflictResolutions.collectAsStateWithLifecycle()
+    val generatedExportLockKey by viewModel.generatedExportLockKey.collectAsStateWithLifecycle()
+
+    var currentDestination by rememberSaveable { mutableStateOf(OrganizerDestination.DASHBOARD) }
+    var selectedServiceIdForDetail by rememberSaveable { mutableStateOf<String?>(null) }
+
+    var showAccountEditor by rememberSaveable { mutableStateOf(false) }
+    var editingAccount by remember { mutableStateOf<AccountWithDetails?>(null) }
+    var initialAccountPassword by remember { mutableStateOf("") }
+
+    var showServiceEditor by rememberSaveable { mutableStateOf(false) }
+    var editingService by remember { mutableStateOf<ServiceWithCount?>(null) }
+
+    var showVaultVerificationDialog by remember { mutableStateOf(false) }
+    var pendingVaultVerifiedAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+
     LaunchedEffect(transientMessage) {
-        val msg = transientMessage ?: return@LaunchedEffect
-        snackbarHostState.showSnackbar(msg)
-        viewModel.clearTransientMessage()
+        val msg = transientMessage
+        if (!msg.isNullOrBlank()) {
+            snackbarHostState.showSnackbar(msg)
+            viewModel.clearTransientMessage()
+        }
     }
 
-    when (val currentLock = lockState) {
-        LockState.Uninitialized -> {
-            Box(modifier = Modifier.fillMaxSize())
+    val isBiometricHardwareAvailable = remember(activity) {
+        BiometricManager.from(activity)
+            .canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG) ==
+            BiometricManager.BIOMETRIC_SUCCESS
+    }
+
+    val saveRecoveryCodeFileLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("text/plain")
+    ) { uri: Uri? ->
+        if (uri != null) {
+            viewModel.writeOneTimeRecoveryCodeToUri(activity, uri)
         }
-        is LockState.Locked -> {
-            UnlockScreen(
-                lockedState = currentLock,
-                errorMessage = unlockError,
-                onUnlockWithPassword = viewModel::unlockWithPassword,
-                onRequestBiometricUnlock = {
-                    viewModel.prepareBiometricUnlockCipher()
-                        .onSuccess { cipher ->
-                            showStrongBiometricPrompt(
-                                activity = activity,
-                                title = "Unlock Digital Account Organizer",
-                                subtitle = "Authenticate with strong biometrics to unwrap the database key",
-                                cipher = cipher,
-                                onSuccess = { authedCipher ->
-                                    viewModel.unlockWithBiometricCipher(authedCipher)
-                                }
-                            )
+    }
+
+    val triggerOneTimeRecoveryCodeDownload: () -> Unit = {
+        val dateStamp = SimpleDateFormat("yyyyMMdd", Locale.US).format(Date())
+        saveRecoveryCodeFileLauncher.launch("dao_recovery_code_$dateStamp.txt")
+    }
+
+    val requestVaultVerifiedAction: (onVerified: () -> Unit) -> Unit = { onVerified ->
+        if (!viewModel.isVaultVerificationRequired()) {
+            onVerified()
+        } else {
+            val unlocked = lockState as? LockState.Unlocked
+            val useMasterPassword =
+                unlocked?.isAppLockEnabled == true && unlocked.useMasterPasswordForVault
+            if (useMasterPassword) {
+                pendingVaultVerifiedAction = onVerified
+                showVaultVerificationDialog = true
+            } else {
+                val bm = BiometricManager.from(activity)
+                val canDeviceAuth = bm.canAuthenticate(
+                    BiometricManager.Authenticators.BIOMETRIC_STRONG or
+                        BiometricManager.Authenticators.DEVICE_CREDENTIAL
+                ) == BiometricManager.BIOMETRIC_SUCCESS
+
+                if (canDeviceAuth) {
+                    launchDeviceOrBiometricPrompt(
+                        activity = activity,
+                        title = "Verify Password Manager",
+                        subtitle = "Verify your identity to view, copy, or edit saved passwords and notes",
+                        onAuthenticated = {
+                            viewModel.recordVaultSessionVerified()
+                            onVerified()
                         }
-                },
-                onRecoverWithKey = viewModel::recoverWithKeyAndResetPassword,
-                onDestructiveReset = viewModel::performDestructiveOrganizerReset,
-                onClearError = viewModel::clearUnlockError
-            )
+                    )
+                } else if (unlocked?.isAppLockEnabled == true) {
+                    pendingVaultVerifiedAction = onVerified
+                    showVaultVerificationDialog = true
+                } else {
+                    // Device has no screen lock configured and no Master Password is enabled
+                    viewModel.recordVaultSessionVerified()
+                    onVerified()
+                }
+            }
         }
+    }
+
+    when (lockState) {
+        is LockState.Uninitialized -> {
+            Scaffold(contentWindowInsets = WindowInsets.safeDrawing) { padding ->
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(padding)
+                )
+            }
+        }
+
+        is LockState.Locked -> {
+            Scaffold(
+                snackbarHost = { SnackbarHost(snackbarHostState) },
+                contentWindowInsets = WindowInsets.safeDrawing
+            ) { padding ->
+                Box(modifier = Modifier.padding(padding)) {
+                    UnlockScreen(
+                        lockedState = lockState,
+                        errorMessage = unlockError,
+                        onUnlockWithPassword = { viewModel.unlockWithPassword(it) },
+                        onRequestBiometricUnlock = {
+                            viewModel.prepareBiometricUnlockCipher()
+                                .onSuccess { cipher ->
+                                    launchCryptoBiometricPrompt(
+                                        activity = activity,
+                                        title = "Unlock Digital Account Organizer",
+                                        subtitle = "Verify your fingerprint to unlock your encrypted workspace",
+                                        cipher = cipher,
+                                        onAuthenticated = { authCipher ->
+                                            viewModel.unlockWithBiometricCipher(authCipher)
+                                        }
+                                    )
+                                }
+                        },
+                        onRecoverWithKey = { code, newPass, onSuccess ->
+                            viewModel.recoverWithKeyAndResetPassword(code, newPass, onSuccess)
+                        },
+                        onRecoverWithBiometric = { newPass, onSuccess ->
+                            viewModel.prepareBiometricUnlockCipher()
+                                .onSuccess { cipher ->
+                                    launchCryptoBiometricPrompt(
+                                        activity = activity,
+                                        title = "Fingerprint Master Password Recovery",
+                                        subtitle = "Verify your fingerprint to reset your forgotten Master Password",
+                                        cipher = cipher,
+                                        onAuthenticated = { authCipher ->
+                                            viewModel.recoverWithBiometricAndResetPassword(
+                                                authenticatedDecryptCipher = authCipher,
+                                                newPasswordInput = newPass,
+                                                onSuccess = onSuccess
+                                            )
+                                        }
+                                    )
+                                }
+                        },
+                        onDestructiveReset = { viewModel.performDestructiveOrganizerReset() },
+                        onClearError = { viewModel.clearUnlockError() }
+                    )
+                }
+            }
+        }
+
         is LockState.Unlocked -> {
-            val dashboardSummary by viewModel.dashboardSummary.collectAsStateWithLifecycle()
-            val services by viewModel.services.collectAsStateWithLifecycle()
-            val categories by viewModel.categories.collectAsStateWithLifecycle()
-            val allAccounts by viewModel.allAccounts.collectAsStateWithLifecycle()
-            val filteredAccounts by viewModel.filteredAccounts.collectAsStateWithLifecycle()
-            val filterState by viewModel.filterState.collectAsStateWithLifecycle()
-            val duplicatePrompt by viewModel.duplicateServicePrompt.collectAsStateWithLifecycle()
-            val stagedBackup by viewModel.stagedBackup.collectAsStateWithLifecycle()
-            val conflictResolutions by viewModel.conflictResolutions.collectAsStateWithLifecycle()
-            val themePreference by viewModel.themePreference.collectAsStateWithLifecycle()
-
-            var currentDestination by rememberSaveable { mutableStateOf(OrganizerDestination.HOME) }
-            var openCreateServiceDialogRequest by rememberSaveable { mutableStateOf(false) }
-            var openCreateAccountForServiceId by rememberSaveable { mutableStateOf<String?>(null) }
-
-            if (currentDestination != OrganizerDestination.HOME) {
+            if (currentDestination != OrganizerDestination.DASHBOARD) {
                 BackHandler {
-                    currentDestination = OrganizerDestination.HOME
+                    currentDestination = OrganizerDestination.DASHBOARD
                 }
             }
 
             BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-                val isExpandedWidth = maxWidth >= 600.dp
+                val useNavRail = maxWidth >= 600.dp
 
                 Scaffold(
-                    contentWindowInsets = WindowInsets.safeDrawing,
                     topBar = {
                         TopAppBar(
-                            title = {
-                                Text(
-                                    text = stringResource(R.string.app_name),
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            },
+                            title = { Text("Digital Account Organizer") },
+                            colors = TopAppBarDefaults.topAppBarColors(
+                                containerColor = MaterialTheme.colorScheme.surface
+                            ),
                             actions = {
-                                if (currentLock.isAppLockEnabled) {
+                                if (lockState.isAppLockEnabled) {
                                     IconButton(
-                                        onClick = viewModel::lockOrganizerNow,
+                                        onClick = { viewModel.lockOrganizerNow() },
                                         modifier = Modifier.testTag("top_bar_lock_button")
                                     ) {
                                         Icon(
                                             imageVector = Icons.Default.Lock,
-                                            contentDescription = stringResource(R.string.action_lock_now)
+                                            contentDescription = "Lock Organizer Now"
                                         )
                                     }
                                 }
-                            },
-                            colors = TopAppBarDefaults.topAppBarColors(
-                                containerColor = MaterialTheme.colorScheme.background,
-                                titleContentColor = MaterialTheme.colorScheme.onBackground
-                            )
+                            }
                         )
                     },
                     bottomBar = {
-                        if (!isExpandedWidth) {
+                        if (!useNavRail) {
                             NavigationBar {
                                 OrganizerDestination.entries.forEach { dest ->
-                                    val selected = currentDestination == dest
                                     NavigationBarItem(
-                                        selected = selected,
+                                        selected = currentDestination == dest,
                                         onClick = { currentDestination = dest },
-                                        icon = {
-                                            Icon(
-                                                imageVector = if (selected) dest.selectedIcon else dest.unselectedIcon,
-                                                contentDescription = stringResource(dest.labelResId)
-                                            )
-                                        },
-                                        label = {
-                                            Text(
-                                                text = stringResource(dest.labelResId),
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                        },
-                                        modifier = Modifier.testTag("nav_tab_${dest.routeId}")
+                                        icon = { Icon(dest.icon, contentDescription = dest.label) },
+                                        label = { Text(dest.label, maxLines = 1) },
+                                        modifier = Modifier.testTag(dest.testTag)
                                     )
                                 }
                             }
                         }
                     },
-                    snackbarHost = { SnackbarHost(hostState = snackbarHostState) }
+                    snackbarHost = { SnackbarHost(snackbarHostState) },
+                    contentWindowInsets = WindowInsets.safeDrawing
                 ) { innerPadding ->
                     Row(
                         modifier = Modifier
                             .fillMaxSize()
                             .padding(innerPadding)
                     ) {
-                        if (isExpandedWidth) {
-                            NavigationRail(modifier = Modifier.fillMaxHeight()) {
+                        if (useNavRail) {
+                            NavigationRail {
                                 OrganizerDestination.entries.forEach { dest ->
-                                    val selected = currentDestination == dest
                                     NavigationRailItem(
-                                        selected = selected,
+                                        selected = currentDestination == dest,
                                         onClick = { currentDestination = dest },
-                                        icon = {
-                                            Icon(
-                                                imageVector = if (selected) dest.selectedIcon else dest.unselectedIcon,
-                                                contentDescription = stringResource(dest.labelResId)
-                                            )
-                                        },
-                                        label = { Text(stringResource(dest.labelResId)) },
-                                        modifier = Modifier.testTag("nav_rail_${dest.routeId}")
+                                        icon = { Icon(dest.icon, contentDescription = dest.label) },
+                                        label = { Text(dest.label) },
+                                        modifier = Modifier.testTag(dest.testTag)
                                     )
                                 }
                             }
                         }
 
-                        Box(modifier = Modifier.fillMaxSize()) {
+                        Box(modifier = Modifier.weight(1f)) {
                             when (currentDestination) {
-                                OrganizerDestination.HOME -> {
+                                OrganizerDestination.DASHBOARD -> {
                                     DashboardScreen(
                                         summary = dashboardSummary,
-                                        isAppLockEnabled = currentLock.isAppLockEnabled,
+                                        isAppLockEnabled = lockState.isAppLockEnabled,
+                                        showInitialLockSuggestion = !lockState.hasDismissedInitialLockSuggestion && !lockState.isAppLockEnabled,
+                                        onKeepDeviceVaultLock = {
+                                            viewModel.dismissInitialLockSuggestion(disableAllLocks = false)
+                                        },
+                                        onOpenSecuritySettings = {
+                                            viewModel.dismissInitialLockSuggestion(disableAllLocks = false)
+                                            currentDestination = OrganizerDestination.SETTINGS
+                                        },
+                                        onSkipAllLocks = {
+                                            viewModel.dismissInitialLockSuggestion(disableAllLocks = true)
+                                        },
                                         onCreateServiceClick = {
-                                            currentDestination = OrganizerDestination.SERVICES
-                                            openCreateServiceDialogRequest = true
+                                            editingService = null
+                                            showServiceEditor = true
                                         },
                                         onAddAccountClick = {
-                                            if (services.isEmpty()) {
-                                                currentDestination = OrganizerDestination.SERVICES
-                                                openCreateServiceDialogRequest = true
-                                            } else {
-                                                currentDestination = OrganizerDestination.ACCOUNTS
-                                                openCreateAccountForServiceId = ""
-                                            }
+                                            editingAccount = null
+                                            initialAccountPassword = ""
+                                            showAccountEditor = true
                                         },
-                                        onOpenAccountsForService = { serviceId ->
-                                            viewModel.clearAllFilters()
-                                            viewModel.selectServiceFilter(serviceId)
-                                            currentDestination = OrganizerDestination.ACCOUNTS
+                                        onOpenServiceDetail = { serviceId ->
+                                            selectedServiceIdForDetail = serviceId
+                                            currentDestination = OrganizerDestination.SERVICES
                                         },
                                         onOpenAccountsForCategory = { categoryId ->
                                             viewModel.clearAllFilters()
@@ -316,64 +409,145 @@ fun OrganizerRootContent(
                                             currentDestination = OrganizerDestination.ACCOUNTS
                                         },
                                         onOpenAllAccounts = {
-                                            viewModel.clearAllFilters()
                                             currentDestination = OrganizerDestination.ACCOUNTS
                                         },
                                         onOpenBackup = {
                                             currentDestination = OrganizerDestination.BACKUP
                                         },
-                                        onLockNowClick = viewModel::lockOrganizerNow
+                                        onLockNowClick = { viewModel.lockOrganizerNow() }
                                     )
                                 }
+
                                 OrganizerDestination.ACCOUNTS -> {
                                     AccountsScreen(
                                         accounts = filteredAccounts,
-                                        services = services,
                                         categories = categories,
                                         filterState = filterState,
-                                        openCreateDialogForServiceId = openCreateAccountForServiceId,
-                                        onConsumeCreateDialogRequest = { openCreateAccountForServiceId = null },
-                                        onUpdateSearchQuery = viewModel::updateSearchQuery,
-                                        onSelectServiceFilter = viewModel::selectServiceFilter,
-                                        onSelectCategoryFilter = viewModel::selectCategoryFilter,
-                                        onSelectStatusFilter = viewModel::selectStatusFilter,
-                                        onToggleShowArchived = viewModel::setShowArchived,
-                                        onSelectSortOrder = viewModel::setSortOrder,
-                                        onClearAllFilters = viewModel::clearAllFilters,
-                                        onSaveAccount = viewModel::saveAccount,
-                                        onToggleArchiveAccount = viewModel::setAccountArchived,
-                                        onDeleteAccountPermanently = viewModel::deleteAccountPermanently,
-                                        onNavigateToCreateService = {
-                                            currentDestination = OrganizerDestination.SERVICES
-                                            openCreateServiceDialogRequest = true
-                                        }
+                                        onSearchQueryChange = { viewModel.updateSearchQuery(it) },
+                                        onSelectCategoryFilter = { viewModel.selectCategoryFilter(it) },
+                                        onSelectStatusFilter = { viewModel.selectStatusFilter(it) },
+                                        onToggleShowArchived = { viewModel.setShowArchived(it) },
+                                        onSelectSortOrder = { viewModel.setSortOrder(it) },
+                                        onClearFilters = { viewModel.clearAllFilters() },
+                                        onAddAccountClick = {
+                                            editingAccount = null
+                                            initialAccountPassword = ""
+                                            showAccountEditor = true
+                                        },
+                                        onEditAccountClick = { item ->
+                                            editingAccount = item
+                                            initialAccountPassword =
+                                                viewModel.decryptSecretField(item.account.encryptedPassword).orEmpty()
+                                            showAccountEditor = true
+                                        },
+                                        onToggleArchiveAccount = { id, archived ->
+                                            viewModel.setAccountArchived(id, archived)
+                                        },
+                                        onDeleteAccountPermanently = { id ->
+                                            viewModel.deleteAccountPermanently(id)
+                                        },
+                                        onDecryptSecret = { viewModel.decryptSecretField(it) },
+                                        onRequestVerifiedAction = requestVaultVerifiedAction
                                     )
                                 }
+
                                 OrganizerDestination.SERVICES -> {
                                     ServicesScreen(
                                         services = services,
-                                        allAccounts = allAccounts,
-                                        duplicatePrompt = duplicatePrompt,
-                                        openCreateDialogRequest = openCreateServiceDialogRequest,
-                                        onConsumeCreateDialogRequest = { openCreateServiceDialogRequest = false },
-                                        onImportLogoUri = viewModel::importServiceLogo,
-                                        onFetchLogoFromUrl = viewModel::fetchServiceLogoFromUrl,
-                                        onCancelLogoFetch = viewModel::cancelServiceLogoFetch,
-                                        onSaveService = viewModel::saveService,
-                                        onDismissDuplicatePrompt = viewModel::dismissDuplicateServicePrompt,
-                                        onToggleArchiveService = viewModel::setServiceArchived,
-                                        onDeleteOrResolveService = viewModel::deleteOrResolveService,
-                                        onAddAccountForService = { serviceId ->
-                                            currentDestination = OrganizerDestination.ACCOUNTS
-                                            openCreateAccountForServiceId = serviceId
+                                        serviceAccounts = allServiceAccounts,
+                                        standaloneAccounts = filteredAccounts,
+                                        categories = categories,
+                                        selectedServiceIdForDetail = selectedServiceIdForDetail,
+                                        duplicatePrompt = duplicateServicePrompt,
+                                        onSelectServiceForDetail = { selectedServiceIdForDetail = it },
+                                        onCreateServiceClick = {
+                                            editingService = null
+                                            showServiceEditor = true
+                                        },
+                                        onEditServiceClick = { svc ->
+                                            editingService = svc
+                                            showServiceEditor = true
+                                        },
+                                        onToggleArchiveService = { id, archived ->
+                                            viewModel.setServiceArchived(id, archived)
+                                        },
+                                        onResolveDeleteService = { serviceId, resolution, reassignId, onCompleted, onError ->
+                                            viewModel.deleteOrResolveService(
+                                                serviceId = serviceId,
+                                                resolution = resolution,
+                                                reassignTargetServiceId = reassignId,
+                                                onCompleted = onCompleted,
+                                                onError = onError
+                                            )
+                                        },
+                                        onConfirmDuplicateServiceVariation = {
+                                            val dup = duplicateServicePrompt
+                                            if (dup != null) {
+                                                viewModel.saveService(
+                                                    existingId = dup.existingId,
+                                                    name = dup.pendingName,
+                                                    websiteUrl = dup.pendingWebsiteUrl,
+                                                    description = dup.pendingDescription,
+                                                    iconAssetId = dup.pendingIconAssetId,
+                                                    allowDuplicateVariation = true,
+                                                    onSaved = { showServiceEditor = false },
+                                                    onError = {}
+                                                )
+                                            }
+                                        },
+                                        onDismissDuplicatePrompt = {
+                                            viewModel.dismissDuplicateServicePrompt()
+                                        },
+                                        onDecryptSecret = { viewModel.decryptSecretField(it) },
+                                        onRequestVerifiedAction = requestVaultVerifiedAction,
+                                        onSaveServiceAccount = { existingId, serviceId, linkedAccId, displayName, email, username, password, categoryId, purpose, recEmail, recPhone, webUrl, notes, status, onSaved, onError ->
+                                            viewModel.saveServiceAccount(
+                                                existingId = existingId,
+                                                serviceId = serviceId,
+                                                linkedAccountId = linkedAccId,
+                                                displayName = displayName,
+                                                email = email,
+                                                username = username,
+                                                password = password,
+                                                categoryId = categoryId,
+                                                purpose = purpose,
+                                                recoveryEmailReference = recEmail,
+                                                recoveryPhoneReference = recPhone,
+                                                websiteUrl = webUrl,
+                                                notes = notes,
+                                                status = status,
+                                                onSaved = onSaved,
+                                                onError = onError
+                                            )
+                                        },
+                                        onToggleArchiveServiceAccount = { id, archived ->
+                                            viewModel.setServiceAccountArchived(id, archived)
+                                        },
+                                        onDeleteServiceAccountPermanently = { id ->
+                                            viewModel.deleteServiceAccountPermanently(id)
                                         }
                                     )
                                 }
+
                                 OrganizerDestination.CATEGORIES -> {
                                     CategoriesScreen(
                                         categories = categories,
-                                        onSaveCategory = viewModel::saveCategory,
-                                        onDeleteCategorySafely = viewModel::deleteCategorySafely,
+                                        onSaveCategory = { existingId, name, description, onSaved, onError ->
+                                            viewModel.saveCategory(
+                                                existingId = existingId,
+                                                name = name,
+                                                description = description,
+                                                onSaved = onSaved,
+                                                onError = onError
+                                            )
+                                        },
+                                        onDeleteCategorySafely = { categoryId, reassignToId, onCompleted ->
+                                            viewModel.deleteCategorySafely(
+                                                categoryId = categoryId,
+                                                reassignToCategoryId = reassignToId,
+                                                onCompleted = onCompleted
+                                            )
+                                        },
                                         onBrowseCategoryAccounts = { categoryId ->
                                             viewModel.clearAllFilters()
                                             viewModel.selectCategoryFilter(categoryId)
@@ -381,58 +555,105 @@ fun OrganizerRootContent(
                                         }
                                     )
                                 }
+
                                 OrganizerDestination.BACKUP -> {
                                     BackupScreen(
+                                        accounts = filteredAccounts,
                                         services = services,
                                         categories = categories,
-                                        accounts = allAccounts,
                                         stagedBackup = stagedBackup,
                                         conflictResolutions = conflictResolutions,
-                                        onPrepareEncryptedExport = viewModel::prepareEncryptedBackup,
-                                        onWriteEncryptedExportToUri = { uri ->
-                                            viewModel.writePendingEncryptedBackupToUri(context, uri)
+                                        generatedExportLockKey = generatedExportLockKey,
+                                        onPrepareAutoLockedBackup = { mode, accIds, svcIds, catIds, onKeyReady, onError ->
+                                            viewModel.prepareAutoLockedEncryptedBackup(
+                                                mode = mode,
+                                                selectedAccountIds = accIds,
+                                                selectedServiceIds = svcIds,
+                                                selectedCategoryIds = catIds,
+                                                onLockKeyGenerated = onKeyReady,
+                                                onError = onError
+                                            )
                                         },
-                                        onPrepareCsvExport = viewModel::preparePlaintextCsvExport,
-                                        onWriteCsvExportToUri = { uri ->
-                                            viewModel.writePendingCsvToUri(context, uri)
+                                        onClearGeneratedExportLockKey = {
+                                            viewModel.clearGeneratedExportLockKey()
                                         },
-                                        onStageBackupFromUri = { uri, pass, onErr ->
-                                            viewModel.stageBackupFromUri(context, uri, pass, onErr)
+                                        onWritePendingBackupToUri = { uri ->
+                                            viewModel.writePendingEncryptedBackupToUri(activity, uri)
                                         },
-                                        onUpdateConflictResolution = viewModel::updateConflictResolution,
-                                        onCommitStagedBackup = viewModel::commitStagedBackup,
-                                        onCancelStagedBackup = viewModel::cancelStagedBackup
+                                        onPreparePlaintextCsv = { onReady, onError ->
+                                            viewModel.preparePlaintextCsvExport(onReady, onError)
+                                        },
+                                        onWritePendingCsvToUri = { uri ->
+                                            viewModel.writePendingCsvToUri(activity, uri)
+                                        },
+                                        onStageBackupFromUri = { uri, lockKey, onError ->
+                                            viewModel.stageBackupFromUri(activity, uri, lockKey, onError)
+                                        },
+                                        onUpdateConflictResolution = { incomingId, resolution ->
+                                            viewModel.updateConflictResolution(incomingId, resolution)
+                                        },
+                                        onCancelStagedBackup = { viewModel.cancelStagedBackup() },
+                                        onCommitStagedBackup = { onError ->
+                                            viewModel.commitStagedBackup(onError)
+                                        }
                                     )
                                 }
+
                                 OrganizerDestination.SETTINGS -> {
                                     SettingsScreen(
-                                        unlockedState = currentLock,
+                                        unlockedState = lockState,
                                         themePreference = themePreference,
-                                        onSelectThemePreference = viewModel::setThemePreference,
-                                        onEnableAppLock = viewModel::enableAppLock,
-                                        onChangeMasterPassword = viewModel::changeMasterPassword,
-                                        onDisableAppLock = viewModel::disableAppLock,
-                                        onUpdateAutoLockTimeout = viewModel::updateAutoLockTimeout,
-                                        onRequestEnableBiometric = {
-                                            val canAuth = BiometricManager.from(activity)
-                                                .canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG)
-                                            if (canAuth == BiometricManager.BIOMETRIC_SUCCESS) {
+                                        colorPalette = colorPalette,
+                                        isBiometricHardwareAvailable = isBiometricHardwareAvailable,
+                                        onSelectThemePreference = { viewModel.setThemePreference(it) },
+                                        onSelectColorPalette = { viewModel.setColorPalette(it) },
+                                        onSetPasswordManagerLockEnabled = {
+                                            viewModel.setPasswordManagerLockEnabled(it)
+                                        },
+                                        onSetUseMasterPasswordForVault = {
+                                            viewModel.setUseMasterPasswordForVault(it)
+                                        },
+                                        onEnableAppLock = { password, timeout, onError ->
+                                            viewModel.enableAppLock(password, timeout, onError)
+                                        },
+                                        onChangeMasterPassword = { currentPass, newPass, onSuccess, onError ->
+                                            viewModel.changeMasterPassword(
+                                                currentPass,
+                                                newPass,
+                                                onSuccess,
+                                                onError
+                                            )
+                                        },
+                                        onDisableAppLock = { currentPass, onSuccess, onError ->
+                                            viewModel.disableAppLock(currentPass, onSuccess, onError)
+                                        },
+                                        onUpdateAutoLockTimeout = {
+                                            viewModel.updateAutoLockTimeout(it)
+                                        },
+                                        onToggleBiometricUnlock = { enable ->
+                                            if (enable) {
                                                 viewModel.prepareBiometricEnrollmentCipher()
                                                     .onSuccess { cipher ->
-                                                        showStrongBiometricPrompt(
+                                                        launchCryptoBiometricPrompt(
                                                             activity = activity,
-                                                            title = "Enable Strong Biometric Unlock",
-                                                            subtitle = "Confirm strong biometric authentication to wrap the database key",
+                                                            title = "Enable Fingerprint Verification",
+                                                            subtitle = "Verify your fingerprint to enable biometric unlock and recovery",
                                                             cipher = cipher,
-                                                            onSuccess = { authedCipher ->
-                                                                viewModel.completeBiometricEnrollment(authedCipher)
+                                                            onAuthenticated = { authCipher ->
+                                                                viewModel.completeBiometricEnrollment(authCipher)
                                                             }
                                                         )
                                                     }
+                                            } else {
+                                                viewModel.disableBiometricUnlock()
                                             }
                                         },
-                                        onDisableBiometric = viewModel::disableBiometricUnlock,
-                                        onLockNow = viewModel::lockOrganizerNow
+                                        onRequestVerifiedAction = requestVaultVerifiedAction,
+                                        onGetDecryptedRecoveryCode = {
+                                            viewModel.getDecryptedRecoveryCode()
+                                        },
+                                        onDownloadRecoveryCodeOnce = triggerOneTimeRecoveryCodeDownload,
+                                        onLockNow = { viewModel.lockOrganizerNow() }
                                     )
                                 }
                             }
@@ -440,24 +661,124 @@ fun OrganizerRootContent(
                     }
                 }
             }
-        }
-    }
 
-    val recoveryCodeToDisplay = oneTimeRecoveryCode
-    if (recoveryCodeToDisplay != null) {
-        OneTimeRecoveryKeyDialog(
-            recoveryCode = recoveryCodeToDisplay,
-            onConfirmedSaved = viewModel::acknowledgeOneTimeRecoveryCode
-        )
+            if (showAccountEditor) {
+                AccountEditorDialog(
+                    initialAccount = editingAccount,
+                    initialDecryptedPassword = initialAccountPassword,
+                    categories = categories,
+                    onDismiss = {
+                        showAccountEditor = false
+                        editingAccount = null
+                    },
+                    onSave = { existingId, displayName, email, username, password, categoryId, purpose, recEmail, recPhone, notes, status, onError ->
+                        viewModel.saveAccount(
+                            existingId = existingId,
+                            displayName = displayName,
+                            email = email,
+                            username = username,
+                            password = password,
+                            categoryId = categoryId,
+                            purpose = purpose,
+                            recoveryEmailReference = recEmail,
+                            recoveryPhoneReference = recPhone,
+                            notes = notes,
+                            status = status,
+                            onSaved = {
+                                showAccountEditor = false
+                                editingAccount = null
+                            },
+                            onError = onError
+                        )
+                    }
+                )
+            }
+
+            if (showServiceEditor) {
+                ServiceEditorDialog(
+                    initialService = editingService,
+                    onImportCustomLogo = { uri, onImported, onError ->
+                        viewModel.importServiceLogo(uri, onImported, onError)
+                    },
+                    onFetchWebsiteLogo = { url, onFetched, onError ->
+                        viewModel.fetchServiceLogoFromUrl(url, onFetched, onError)
+                    },
+                    onCancelWebsiteLogoFetch = {
+                        viewModel.cancelServiceLogoFetch()
+                    },
+                    onDismiss = {
+                        showServiceEditor = false
+                        editingService = null
+                    },
+                    onSave = { existingId, name, websiteUrl, description, iconAssetId, onError ->
+                        viewModel.saveService(
+                            existingId = existingId,
+                            name = name,
+                            websiteUrl = websiteUrl,
+                            description = description,
+                            iconAssetId = iconAssetId,
+                            onSaved = {
+                                showServiceEditor = false
+                                editingService = null
+                            },
+                            onError = onError
+                        )
+                    }
+                )
+            }
+
+            if (showVaultVerificationDialog) {
+                VaultVerificationDialog(
+                    isBiometricEnabled = lockState.isBiometricEnabled && isBiometricHardwareAvailable,
+                    onVerifyWithMasterPassword = { pass ->
+                        viewModel.verifyVaultWithMasterPassword(pass)
+                    },
+                    onRequestBiometricOrDeviceVerify = {
+                        launchDeviceOrBiometricPrompt(
+                            activity = activity,
+                            title = "Verify Password Manager",
+                            subtitle = "Verify your fingerprint or device lock to reveal passwords and notes",
+                            onAuthenticated = {
+                                viewModel.recordVaultSessionVerified()
+                                showVaultVerificationDialog = false
+                                val action = pendingVaultVerifiedAction
+                                pendingVaultVerifiedAction = null
+                                action?.invoke()
+                            }
+                        )
+                    },
+                    onVerified = {
+                        showVaultVerificationDialog = false
+                        val action = pendingVaultVerifiedAction
+                        pendingVaultVerifiedAction = null
+                        action?.invoke()
+                    },
+                    onDismiss = {
+                        showVaultVerificationDialog = false
+                        pendingVaultVerifiedAction = null
+                    }
+                )
+            }
+
+            val recoveryCodeToDisplay = oneTimeRecoveryCode
+            if (!recoveryCodeToDisplay.isNullOrBlank()) {
+                OneTimeRecoveryKeyDialog(
+                    recoveryCode = recoveryCodeToDisplay,
+                    canDownloadFileOnce = !lockState.recoveryCodesDownloadedOnce,
+                    onDownloadFileOnce = triggerOneTimeRecoveryCodeDownload,
+                    onConfirmedSaved = { viewModel.acknowledgeOneTimeRecoveryCode() }
+                )
+            }
+        }
     }
 }
 
-private fun showStrongBiometricPrompt(
+private fun launchCryptoBiometricPrompt(
     activity: FragmentActivity,
     title: String,
     subtitle: String,
     cipher: Cipher,
-    onSuccess: (Cipher) -> Unit
+    onAuthenticated: (Cipher) -> Unit
 ) {
     val executor = ContextCompat.getMainExecutor(activity)
     val prompt = BiometricPrompt(
@@ -466,16 +787,45 @@ private fun showStrongBiometricPrompt(
         object : BiometricPrompt.AuthenticationCallback() {
             override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
                 super.onAuthenticationSucceeded(result)
-                result.cryptoObject?.cipher?.let(onSuccess)
+                result.cryptoObject?.cipher?.let(onAuthenticated)
             }
         }
     )
-    val promptInfo = BiometricPrompt.PromptInfo.Builder()
+    val info = BiometricPrompt.PromptInfo.Builder()
         .setTitle(title)
         .setSubtitle(subtitle)
-        .setNegativeButtonText("Use Master Password")
         .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
+        .setNegativeButtonText("Use Password")
         .build()
 
-    prompt.authenticate(promptInfo, BiometricPrompt.CryptoObject(cipher))
+    prompt.authenticate(info, BiometricPrompt.CryptoObject(cipher))
+}
+
+private fun launchDeviceOrBiometricPrompt(
+    activity: FragmentActivity,
+    title: String,
+    subtitle: String,
+    onAuthenticated: () -> Unit
+) {
+    val executor = ContextCompat.getMainExecutor(activity)
+    val prompt = BiometricPrompt(
+        activity,
+        executor,
+        object : BiometricPrompt.AuthenticationCallback() {
+            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                super.onAuthenticationSucceeded(result)
+                onAuthenticated()
+            }
+        }
+    )
+    val info = BiometricPrompt.PromptInfo.Builder()
+        .setTitle(title)
+        .setSubtitle(subtitle)
+        .setAllowedAuthenticators(
+            BiometricManager.Authenticators.BIOMETRIC_STRONG or
+                BiometricManager.Authenticators.DEVICE_CREDENTIAL
+        )
+        .build()
+
+    prompt.authenticate(info)
 }

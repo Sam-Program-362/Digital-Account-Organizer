@@ -16,9 +16,10 @@ import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
         ServiceEntity::class,
         CategoryEntity::class,
         AccountEntity::class,
+        ServiceAccountEntity::class,
         AppPreferenceEntity::class
     ],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class OrganizerDatabase : RoomDatabase() {
@@ -26,16 +27,126 @@ abstract class OrganizerDatabase : RoomDatabase() {
     abstract fun serviceDao(): ServiceDao
     abstract fun categoryDao(): CategoryDao
     abstract fun accountDao(): AccountDao
+    abstract fun serviceAccountDao(): ServiceAccountDao
     abstract fun appPreferenceDao(): AppPreferenceDao
 
     companion object {
         /**
-         * Explicit forward migration baseline so future schema upgrades preserve encrypted data
-         * without ever using fallbackToDestructiveMigration().
+         * Forward migration from v1 (where `accounts` was coupled to `serviceId`) to v2
+         * (where standalone `accounts` and `service_accounts` are separated and both support
+         * `encryptedPassword`).
          */
         val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: SupportSQLiteDatabase) {
-                // Reserved for v2 additive schema evolution
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `service_accounts` (
+                        `id` TEXT NOT NULL,
+                        `serviceId` TEXT NOT NULL,
+                        `linkedAccountId` TEXT,
+                        `displayName` TEXT NOT NULL,
+                        `normalizedDisplayName` TEXT NOT NULL,
+                        `email` TEXT,
+                        `normalizedEmail` TEXT,
+                        `username` TEXT,
+                        `normalizedUsername` TEXT,
+                        `encryptedPassword` TEXT,
+                        `categoryId` TEXT,
+                        `purpose` TEXT,
+                        `recoveryEmailReference` TEXT,
+                        `recoveryPhoneReference` TEXT,
+                        `websiteUrl` TEXT,
+                        `notes` TEXT,
+                        `status` TEXT NOT NULL,
+                        `createdAtEpochMillis` INTEGER NOT NULL,
+                        `updatedAtEpochMillis` INTEGER NOT NULL,
+                        `archivedAtEpochMillis` INTEGER,
+                        PRIMARY KEY(`id`),
+                        FOREIGN KEY(`serviceId`) REFERENCES `services`(`id`) ON UPDATE NO ACTION ON DELETE RESTRICT,
+                        FOREIGN KEY(`linkedAccountId`) REFERENCES `accounts`(`id`) ON UPDATE NO ACTION ON DELETE SET NULL,
+                        FOREIGN KEY(`categoryId`) REFERENCES `categories`(`id`) ON UPDATE NO ACTION ON DELETE SET NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_service_accounts_serviceId` ON `service_accounts` (`serviceId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_service_accounts_linkedAccountId` ON `service_accounts` (`linkedAccountId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_service_accounts_categoryId` ON `service_accounts` (`categoryId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_service_accounts_status` ON `service_accounts` (`status`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_service_accounts_archivedAtEpochMillis` ON `service_accounts` (`archivedAtEpochMillis`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_service_accounts_updatedAtEpochMillis` ON `service_accounts` (`updatedAtEpochMillis`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_service_accounts_normalizedDisplayName` ON `service_accounts` (`normalizedDisplayName`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_service_accounts_normalizedEmail` ON `service_accounts` (`normalizedEmail`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_service_accounts_normalizedUsername` ON `service_accounts` (`normalizedUsername`)")
+
+                // Copy existing v1 service-tied accounts into service_accounts
+                db.execSQL(
+                    """
+                    INSERT INTO `service_accounts` (
+                        `id`, `serviceId`, `linkedAccountId`, `displayName`, `normalizedDisplayName`,
+                        `email`, `normalizedEmail`, `username`, `normalizedUsername`, `encryptedPassword`,
+                        `categoryId`, `purpose`, `recoveryEmailReference`, `recoveryPhoneReference`,
+                        `websiteUrl`, `notes`, `status`, `createdAtEpochMillis`, `updatedAtEpochMillis`, `archivedAtEpochMillis`
+                    )
+                    SELECT
+                        `id`, `serviceId`, `id`, `displayName`, `normalizedDisplayName`,
+                        `email`, `normalizedEmail`, `username`, `normalizedUsername`, NULL,
+                        `categoryId`, `purpose`, `recoveryEmailReference`, `recoveryPhoneReference`,
+                        `websiteUrl`, `notes`, `status`, `createdAtEpochMillis`, `updatedAtEpochMillis`, `archivedAtEpochMillis`
+                    FROM `accounts`
+                    """.trimIndent()
+                )
+
+                // Rebuild `accounts` table as standalone core accounts without `serviceId`
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `accounts_new` (
+                        `id` TEXT NOT NULL,
+                        `displayName` TEXT NOT NULL,
+                        `normalizedDisplayName` TEXT NOT NULL,
+                        `email` TEXT,
+                        `normalizedEmail` TEXT,
+                        `username` TEXT,
+                        `normalizedUsername` TEXT,
+                        `encryptedPassword` TEXT,
+                        `categoryId` TEXT,
+                        `purpose` TEXT,
+                        `recoveryEmailReference` TEXT,
+                        `recoveryPhoneReference` TEXT,
+                        `notes` TEXT,
+                        `status` TEXT NOT NULL,
+                        `createdAtEpochMillis` INTEGER NOT NULL,
+                        `updatedAtEpochMillis` INTEGER NOT NULL,
+                        `archivedAtEpochMillis` INTEGER,
+                        PRIMARY KEY(`id`),
+                        FOREIGN KEY(`categoryId`) REFERENCES `categories`(`id`) ON UPDATE NO ACTION ON DELETE SET NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    INSERT INTO `accounts_new` (
+                        `id`, `displayName`, `normalizedDisplayName`, `email`, `normalizedEmail`,
+                        `username`, `normalizedUsername`, `encryptedPassword`, `categoryId`, `purpose`,
+                        `recoveryEmailReference`, `recoveryPhoneReference`, `notes`, `status`,
+                        `createdAtEpochMillis`, `updatedAtEpochMillis`, `archivedAtEpochMillis`
+                    )
+                    SELECT
+                        `id`, `displayName`, `normalizedDisplayName`, `email`, `normalizedEmail`,
+                        `username`, `normalizedUsername`, NULL, `categoryId`, `purpose`,
+                        `recoveryEmailReference`, `recoveryPhoneReference`, `notes`, `status`,
+                        `createdAtEpochMillis`, `updatedAtEpochMillis`, `archivedAtEpochMillis`
+                    FROM `accounts`
+                    """.trimIndent()
+                )
+                db.execSQL("DROP TABLE `accounts`")
+                db.execSQL("ALTER TABLE `accounts_new` RENAME TO `accounts`")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_accounts_categoryId` ON `accounts` (`categoryId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_accounts_status` ON `accounts` (`status`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_accounts_archivedAtEpochMillis` ON `accounts` (`archivedAtEpochMillis`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_accounts_updatedAtEpochMillis` ON `accounts` (`updatedAtEpochMillis`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_accounts_normalizedDisplayName` ON `accounts` (`normalizedDisplayName`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_accounts_normalizedEmail` ON `accounts` (`normalizedEmail`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_accounts_normalizedUsername` ON `accounts` (`normalizedUsername`)")
             }
         }
     }

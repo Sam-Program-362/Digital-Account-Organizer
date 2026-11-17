@@ -8,6 +8,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.core.database.OrganizerRepository
 import com.example.core.database.SaveAccountOutcome
 import com.example.core.database.SaveCategoryOutcome
+import com.example.core.database.SaveServiceAccountOutcome
 import com.example.core.database.SaveServiceOutcome
 import com.example.core.security.AutoLockTimeout
 import com.example.core.security.DatabaseKeyManager
@@ -15,9 +16,11 @@ import com.example.core.security.LockState
 import com.example.core.security.clearChars
 import com.example.domain.model.AccountStatus
 import com.example.domain.model.AccountWithDetails
+import com.example.domain.model.AppColorPalette
 import com.example.domain.model.CategoryWithCount
 import com.example.domain.model.DashboardSummary
 import com.example.domain.model.Normalizer
+import com.example.domain.model.ServiceAccountWithDetails
 import com.example.domain.model.ServiceAssetRecord
 import com.example.domain.model.ServiceDeleteResolution
 import com.example.domain.model.ServiceWithCount
@@ -27,6 +30,7 @@ import com.example.feature.backup.ConflictResolution
 import com.example.feature.backup.ExportMode
 import com.example.feature.backup.ExportSelection
 import com.example.feature.backup.StagedBackupPackage
+import java.time.Instant
 import javax.crypto.Cipher
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
@@ -44,13 +48,12 @@ import kotlinx.coroutines.launch
 enum class AccountSortOrder(val displayLabel: String) {
     RECENTLY_UPDATED("Recently Updated"),
     LABEL_ASC("Account Label (A–Z)"),
-    SERVICE_ASC("Service Name (A–Z)"),
+    EMAIL_ASC("Email / Username (A–Z)"),
     CREATED_NEWEST("Recently Created")
 }
 
 data class AccountFilterState(
     val searchQuery: String = "",
-    val selectedServiceId: String? = null,
     val selectedCategoryId: String? = null,
     val selectedStatus: AccountStatus? = null,
     val showArchived: Boolean = false,
@@ -99,6 +102,9 @@ class OrganizerViewModel(
     val conflictResolutions: StateFlow<Map<String, ConflictResolution>> = _conflictResolutions.asStateFlow()
 
     private val _pendingExportBytes = MutableStateFlow<ByteArray?>(null)
+    private val _generatedExportLockKey = MutableStateFlow<String?>(null)
+    val generatedExportLockKey: StateFlow<String?> = _generatedExportLockKey.asStateFlow()
+
     private val _pendingCsvContent = MutableStateFlow<String?>(null)
 
     private fun <T> unlockedFlow(defaultValue: T, block: () -> Flow<T>): StateFlow<T> {
@@ -127,6 +133,10 @@ class OrganizerViewModel(
         repository.observeAccountsWithDetails()
     }
 
+    val allServiceAccounts: StateFlow<List<ServiceAccountWithDetails>> = unlockedFlow(emptyList()) {
+        repository.observeServiceAccountsWithDetails()
+    }
+
     val dashboardSummary: StateFlow<DashboardSummary> = unlockedFlow(
         DashboardSummary(0, 0, 0, 0, emptyList(), emptyList(), emptyList())
     ) {
@@ -137,6 +147,13 @@ class OrganizerViewModel(
         repository.observeThemePreference()
     }
 
+    val colorPalette: StateFlow<AppColorPalette> = unlockedFlow(AppColorPalette.EMERALD) {
+        repository.observeColorPalette()
+    }
+
+    /**
+     * Searches and filters ONLY standalone core Accounts (never mixing in Service Account entries).
+     */
     val filteredAccounts: StateFlow<List<AccountWithDetails>> = combine(
         allAccounts,
         _filterState
@@ -144,7 +161,6 @@ class OrganizerViewModel(
         val normalizedQuery = Normalizer.normalizeName(filter.searchQuery)
         accounts.filter { item ->
             val matchesArchive = if (filter.showArchived) true else !item.account.isArchived
-            val matchesService = filter.selectedServiceId == null || item.account.serviceId == filter.selectedServiceId
             val matchesCategory = filter.selectedCategoryId == null || item.account.categoryId == filter.selectedCategoryId
             val matchesStatus = filter.selectedStatus == null || item.account.status == filter.selectedStatus
             val matchesQuery = if (normalizedQuery.isEmpty()) {
@@ -153,20 +169,19 @@ class OrganizerViewModel(
                 item.account.normalizedDisplayName.contains(normalizedQuery) ||
                     (item.account.normalizedEmail?.contains(normalizedQuery) == true) ||
                     (item.account.normalizedUsername?.contains(normalizedQuery) == true) ||
-                    item.service.normalizedName.contains(normalizedQuery) ||
                     (item.category?.normalizedName?.contains(normalizedQuery) == true) ||
                     (item.account.purpose?.lowercase()?.contains(normalizedQuery) == true)
             }
-            matchesArchive && matchesService && matchesCategory && matchesStatus && matchesQuery
+            matchesArchive && matchesCategory && matchesStatus && matchesQuery
         }.let { filtered ->
             when (filter.sortOrder) {
                 AccountSortOrder.RECENTLY_UPDATED ->
                     filtered.sortedByDescending { it.account.updatedAtEpochMillis }
                 AccountSortOrder.LABEL_ASC ->
                     filtered.sortedBy { it.account.normalizedDisplayName }
-                AccountSortOrder.SERVICE_ASC ->
+                AccountSortOrder.EMAIL_ASC ->
                     filtered.sortedWith(
-                        compareBy<AccountWithDetails> { it.service.normalizedName }
+                        compareBy<AccountWithDetails> { it.account.normalizedEmail ?: it.account.normalizedUsername ?: "zzzz" }
                             .thenBy { it.account.normalizedDisplayName }
                     )
                 AccountSortOrder.CREATED_NEWEST ->
@@ -191,13 +206,91 @@ class OrganizerViewModel(
         _oneTimeRecoveryCode.value = null
     }
 
-    // --- Filter mutations ---
-    fun updateSearchQuery(query: String) {
-        _filterState.update { it.copy(searchQuery = query) }
+    // --- Password Manager Verification & Secret Decryption ---
+    fun decryptSecretField(encryptedValue: String?): String? =
+        repository.decryptSecret(encryptedValue)
+
+    fun isVaultVerificationRequired(): Boolean =
+        keyManager.isVaultVerificationRequired()
+
+    fun recordVaultSessionVerified() {
+        keyManager.recordVaultSessionVerified()
     }
 
-    fun selectServiceFilter(serviceId: String?) {
-        _filterState.update { it.copy(selectedServiceId = serviceId) }
+    fun verifyVaultWithMasterPassword(passwordInput: String): Boolean {
+        val chars = passwordInput.toCharArray()
+        return try {
+            keyManager.verifyVaultWithMasterPassword(chars)
+        } finally {
+            chars.clearChars()
+        }
+    }
+
+    fun setPasswordManagerLockEnabled(enabled: Boolean) {
+        keyManager.setPasswordManagerLockEnabled(enabled)
+        _transientMessage.value = if (enabled) {
+            "Password Manager verification enabled (5-minute session window)."
+        } else {
+            "Password Manager verification disabled."
+        }
+    }
+
+    fun setUseMasterPasswordForVault(useMasterPassword: Boolean) {
+        keyManager.setUseMasterPasswordForVault(useMasterPassword)
+        _transientMessage.value = if (useMasterPassword) {
+            "Password Manager now verifies with Master Password."
+        } else {
+            "Password Manager now verifies with Device Lock (Default)."
+        }
+    }
+
+    fun dismissInitialLockSuggestion(disableAllLocks: Boolean = false) {
+        keyManager.dismissInitialLockSuggestion(disableAllLocks = disableAllLocks)
+        if (disableAllLocks) {
+            _transientMessage.value = "Continuing without locks. You can enable protection anytime in Settings."
+        }
+    }
+
+    fun getDecryptedRecoveryCode(): String? =
+        keyManager.getDecryptedRecoveryCode()
+
+    fun writeOneTimeRecoveryCodeToUri(context: Context, destinationUri: Uri) {
+        val code = keyManager.getDecryptedRecoveryCode()
+        if (code.isNullOrBlank()) {
+            _transientMessage.value = "No recovery code available to download."
+            return
+        }
+        viewModelScope.launch {
+            runCatching {
+                val content = buildString {
+                    appendLine("==================================================")
+                    appendLine("DIGITAL ACCOUNT ORGANIZER — RECOVERY CODE")
+                    appendLine("==================================================")
+                    appendLine("Generated / Exported (UTC): ${Instant.now()}")
+                    appendLine()
+                    appendLine("Recovery Code:")
+                    appendLine(code)
+                    appendLine()
+                    appendLine("Keep this file in a safe place outside this device.")
+                    appendLine("This recovery code can reset a forgotten Master Password.")
+                    appendLine("==================================================")
+                }
+                context.contentResolver.openOutputStream(destinationUri)?.use { out ->
+                    out.write(content.toByteArray(Charsets.UTF_8))
+                    out.flush()
+                } ?: error("Unable to open destination file.")
+                keyManager.markRecoveryCodeFileDownloadedOnce()
+            }.onSuccess {
+                _transientMessage.value = "Recovery code file downloaded (one-time download completed)."
+            }.onFailure { e ->
+                _transientMessage.value = "Could not save recovery code file: ${e.message}"
+            }
+        }
+    }
+
+    // --- Filter mutations (Standalone Accounts) ---
+    fun updateSearchQuery(query: String) {
+        _filterState.update { it.copy(searchQuery = query) }
     }
 
     fun selectCategoryFilter(categoryId: String?) {
@@ -249,11 +342,36 @@ class OrganizerViewModel(
                 result.recoveryCode.clearChars()
                 _unlockError.value = null
                 onSuccess()
-                _transientMessage.value = "Master password reset. Save your new recovery key."
+                _transientMessage.value = "Master password reset. Save your new recovery code."
             } catch (e: Exception) {
                 _unlockError.value = e.message ?: "Invalid recovery key or password."
             } finally {
                 codeChars.clearChars()
+                passChars.clearChars()
+            }
+        }
+    }
+
+    fun recoverWithBiometricAndResetPassword(
+        authenticatedDecryptCipher: Cipher,
+        newPasswordInput: String,
+        onSuccess: () -> Unit
+    ) {
+        val passChars = newPasswordInput.toCharArray()
+        viewModelScope.launch {
+            try {
+                val result = keyManager.recoverAndResetMasterPasswordWithBiometric(
+                    authenticatedDecryptCipher = authenticatedDecryptCipher,
+                    newMasterPassword = passChars
+                )
+                _oneTimeRecoveryCode.value = String(result.recoveryCode)
+                result.recoveryCode.clearChars()
+                _unlockError.value = null
+                onSuccess()
+                _transientMessage.value = "Master password reset via Fingerprint. Save your new recovery code."
+            } catch (e: Exception) {
+                _unlockError.value = e.message ?: "Fingerprint recovery failed."
+            } finally {
                 passChars.clearChars()
             }
         }
@@ -281,7 +399,7 @@ class OrganizerViewModel(
                 val result = keyManager.enableAppLock(chars, timeout)
                 _oneTimeRecoveryCode.value = String(result.recoveryCode)
                 result.recoveryCode.clearChars()
-                _transientMessage.value = "App lock enabled. Please confirm your recovery key."
+                _transientMessage.value = "Master password lock enabled. Recovery code saved encrypted."
             } catch (e: Exception) {
                 onError(e.message ?: "Unable to enable app lock.")
             } finally {
@@ -304,7 +422,7 @@ class OrganizerViewModel(
                 _transientMessage.value = "Master password updated."
                 onSuccess()
             } catch (_: Exception) {
-                onError("Current master password is incorrect or new password is too short (12+ characters required).")
+                onError("Current master password is incorrect or new password is too short (8+ characters required).")
             } finally {
                 currentChars.clearChars()
                 newChars.clearChars()
@@ -321,7 +439,7 @@ class OrganizerViewModel(
         viewModelScope.launch {
             try {
                 keyManager.disableAppLock(currentChars)
-                _transientMessage.value = "App lock disabled. Database remains encrypted via device Keystore."
+                _transientMessage.value = "Master password lock disabled. Database remains encrypted at rest."
                 onSuccess()
             } catch (_: Exception) {
                 onError("Incorrect master password.")
@@ -346,9 +464,9 @@ class OrganizerViewModel(
     fun completeBiometricEnrollment(cipher: Cipher) {
         runCatching {
             keyManager.completeBiometricEnrollment(cipher)
-            _transientMessage.value = "Biometric unlock enabled."
+            _transientMessage.value = "Fingerprint verification & recovery enabled."
         }.onFailure {
-            _transientMessage.value = "Could not complete biometric setup: ${it.message}"
+            _transientMessage.value = "Could not complete fingerprint setup: ${it.message}"
         }
     }
 
@@ -360,14 +478,14 @@ class OrganizerViewModel(
             keyManager.unlockWithBiometricCipher(cipher)
             _unlockError.value = null
         }.onFailure {
-            _unlockError.value = "Biometric unlock failed. Please use your master password."
+            _unlockError.value = "Fingerprint unlock failed. Please use your master password."
         }
     }
 
     fun disableBiometricUnlock() {
         runCatching {
             keyManager.disableBiometricUnlock()
-            _transientMessage.value = "Biometric unlock disabled."
+            _transientMessage.value = "Fingerprint verification disabled."
         }
     }
 
@@ -485,8 +603,8 @@ class OrganizerViewModel(
             }.onSuccess {
                 _transientMessage.value = when (resolution) {
                     ServiceDeleteResolution.ARCHIVE_SERVICE_INSTEAD -> "Service archived safely."
-                    ServiceDeleteResolution.REASSIGN_ACCOUNTS_TO_SERVICE -> "Accounts moved and service deleted."
-                    ServiceDeleteResolution.DELETE_SERVICE_AND_ACCOUNTS -> "Service and linked accounts deleted."
+                    ServiceDeleteResolution.REASSIGN_ACCOUNTS_TO_SERVICE -> "Service entries moved and service deleted."
+                    ServiceDeleteResolution.DELETE_SERVICE_AND_ACCOUNTS -> "Service and its service entries deleted."
                 }
                 onCompleted()
             }.onFailure { e ->
@@ -531,18 +649,17 @@ class OrganizerViewModel(
         }
     }
 
-    // --- Account Operations ---
+    // --- Standalone Account Operations ---
     fun saveAccount(
         existingId: String? = null,
-        serviceId: String,
         displayName: String,
         email: String?,
         username: String?,
+        password: String?,
         categoryId: String?,
         purpose: String?,
         recoveryEmailReference: String?,
         recoveryPhoneReference: String?,
-        websiteUrl: String?,
         notes: String?,
         status: AccountStatus,
         onSaved: () -> Unit,
@@ -552,15 +669,14 @@ class OrganizerViewModel(
             when (
                 val outcome = repository.saveAccount(
                     existingId = existingId,
-                    serviceId = serviceId,
                     displayName = displayName,
                     email = email,
                     username = username,
+                    password = password,
                     categoryId = categoryId,
                     purpose = purpose,
                     recoveryEmailReference = recoveryEmailReference,
                     recoveryPhoneReference = recoveryPhoneReference,
-                    websiteUrl = websiteUrl,
                     notes = notes,
                     status = status
                 )
@@ -590,28 +706,97 @@ class OrganizerViewModel(
         }
     }
 
-    // --- Theme Preference ---
+    // --- Service Account Entry Operations ---
+    fun saveServiceAccount(
+        existingId: String? = null,
+        serviceId: String,
+        linkedAccountId: String?,
+        displayName: String,
+        email: String?,
+        username: String?,
+        password: String?,
+        categoryId: String?,
+        purpose: String?,
+        recoveryEmailReference: String?,
+        recoveryPhoneReference: String?,
+        websiteUrl: String?,
+        notes: String?,
+        status: AccountStatus,
+        onSaved: () -> Unit,
+        onError: (String) -> Unit
+    ) {
+        viewModelScope.launch {
+            when (
+                val outcome = repository.saveServiceAccount(
+                    existingId = existingId,
+                    serviceId = serviceId,
+                    linkedAccountId = linkedAccountId,
+                    displayName = displayName,
+                    email = email,
+                    username = username,
+                    password = password,
+                    categoryId = categoryId,
+                    purpose = purpose,
+                    recoveryEmailReference = recoveryEmailReference,
+                    recoveryPhoneReference = recoveryPhoneReference,
+                    websiteUrl = websiteUrl,
+                    notes = notes,
+                    status = status
+                )
+            ) {
+                is SaveServiceAccountOutcome.Saved -> {
+                    _transientMessage.value = "Service entry '${outcome.serviceAccount.displayName}' saved."
+                    onSaved()
+                }
+                is SaveServiceAccountOutcome.ValidationError -> {
+                    onError(outcome.message)
+                }
+            }
+        }
+    }
+
+    fun setServiceAccountArchived(serviceAccountId: String, archived: Boolean) {
+        viewModelScope.launch {
+            repository.setServiceAccountArchived(serviceAccountId, archived)
+            _transientMessage.value = if (archived) "Service entry archived." else "Service entry restored."
+        }
+    }
+
+    fun deleteServiceAccountPermanently(serviceAccountId: String) {
+        viewModelScope.launch {
+            repository.deleteServiceAccountPermanently(serviceAccountId)
+            _transientMessage.value = "Service entry permanently deleted."
+        }
+    }
+
+    // --- Theme & Color Palette Preferences ---
     fun setThemePreference(theme: ThemePreference) {
         viewModelScope.launch {
             repository.setThemePreference(theme)
         }
     }
 
-    // --- Backup & Restore Operations ---
-    fun prepareEncryptedBackup(
-        passphraseInput: String,
+    fun setColorPalette(palette: AppColorPalette) {
+        viewModelScope.launch {
+            repository.setColorPalette(palette)
+        }
+    }
+
+    // --- Backup & Restore Operations (App-Generated Export Lock Key) ---
+    fun prepareAutoLockedEncryptedBackup(
         mode: ExportMode,
         selectedAccountIds: Set<String> = emptySet(),
         selectedServiceIds: Set<String> = emptySet(),
         selectedCategoryIds: Set<String> = emptySet(),
-        onReadyForSafSave: () -> Unit,
+        onLockKeyGenerated: (String) -> Unit,
         onError: (String) -> Unit
     ) {
-        val passChars = passphraseInput.toCharArray()
+        val generatedKey = backupEngine.generateExportLockKey()
+        val keyChars = generatedKey.toCharArray()
         viewModelScope.launch {
             try {
                 val bytes = backupEngine.createEncryptedBackupBytes(
-                    passphrase = passChars,
+                    passphrase = keyChars,
                     selection = ExportSelection(
                         mode = mode,
                         selectedAccountIds = selectedAccountIds,
@@ -620,13 +805,18 @@ class OrganizerViewModel(
                     )
                 )
                 _pendingExportBytes.value = bytes
-                onReadyForSafSave()
+                _generatedExportLockKey.value = generatedKey
+                onLockKeyGenerated(generatedKey)
             } catch (e: Exception) {
                 onError(e.message ?: "Failed to create encrypted backup.")
             } finally {
-                passChars.clearChars()
+                keyChars.clearChars()
             }
         }
+    }
+
+    fun clearGeneratedExportLockKey() {
+        _generatedExportLockKey.value = null
     }
 
     fun writePendingEncryptedBackupToUri(context: Context, destinationUri: Uri) {
@@ -638,7 +828,7 @@ class OrganizerViewModel(
                     out.flush()
                 } ?: error("Unable to open destination file.")
             }.onSuccess {
-                _transientMessage.value = "Encrypted .dao-backup exported (${bytes.size / 1024} KB)."
+                _transientMessage.value = "Encrypted .dao-backup exported (${bytes.size / 1024} KB). Keep your Export Lock Key safe!"
             }.onFailure { e ->
                 _transientMessage.value = "Export failed: ${e.message}"
             }
@@ -698,7 +888,7 @@ class OrganizerViewModel(
                     it.incomingId to ConflictResolution.SKIP
                 }
             } catch (e: Exception) {
-                onError(e.message ?: "Incorrect backup passphrase or damaged backup file.")
+                onError(e.message ?: "Incorrect Export Lock Key or damaged backup file.")
             } finally {
                 passChars.clearChars()
             }
@@ -726,7 +916,7 @@ class OrganizerViewModel(
                 _stagedBackup.value = null
                 _conflictResolutions.value = emptyMap()
                 _transientMessage.value =
-                    "Import complete: +${summary.importedAccounts} accounts, +${summary.importedServices} services, +${summary.importedCategories} categories (${summary.replacedRecords} replaced, ${summary.skippedRecords} skipped)."
+                    "Import complete: +${summary.importedAccounts} accounts, +${summary.importedServiceAccounts} service entries, +${summary.importedServices} services (${summary.replacedRecords} replaced, ${summary.skippedRecords} skipped)."
             }.onFailure { e ->
                 onError(e.message ?: "Failed to commit backup import.")
             }

@@ -4,13 +4,18 @@ import android.net.Uri
 import androidx.room.withTransaction
 import com.example.core.files.ServiceAssetStorage
 import com.example.core.files.WebsiteLogoFetcher
+import com.example.core.security.DatabaseKeyManager
 import com.example.domain.model.AccountRecord
 import com.example.domain.model.AccountStatus
 import com.example.domain.model.AccountWithDetails
+import com.example.domain.model.AppColorPalette
 import com.example.domain.model.CategoryRecord
 import com.example.domain.model.CategoryWithCount
 import com.example.domain.model.DashboardSummary
+import com.example.domain.model.LinkedServiceSummary
 import com.example.domain.model.Normalizer
+import com.example.domain.model.ServiceAccountRecord
+import com.example.domain.model.ServiceAccountWithDetails
 import com.example.domain.model.ServiceAssetRecord
 import com.example.domain.model.ServiceDeleteResolution
 import com.example.domain.model.ServiceRecord
@@ -44,9 +49,15 @@ sealed interface SaveAccountOutcome {
     data class ValidationError(val message: String) : SaveAccountOutcome
 }
 
+sealed interface SaveServiceAccountOutcome {
+    data class Saved(val serviceAccount: ServiceAccountRecord) : SaveServiceAccountOutcome
+    data class ValidationError(val message: String) : SaveServiceAccountOutcome
+}
+
 class OrganizerRepository(
     private val databaseFactory: EncryptedDatabaseFactory,
     private val assetStorage: ServiceAssetStorage,
+    private val keyManager: DatabaseKeyManager? = null,
     private val websiteLogoFetcher: WebsiteLogoFetcher = WebsiteLogoFetcher(
         context = null,
         assetStorage = assetStorage
@@ -56,16 +67,26 @@ class OrganizerRepository(
     private val db: OrganizerDatabase
         get() = databaseFactory.getUnlockedDatabase()
 
+    fun encryptSecret(plaintext: String?): String? {
+        val cleaned = plaintext?.takeIf { it.isNotEmpty() } ?: return null
+        return keyManager?.encryptSecretField(cleaned) ?: cleaned
+    }
+
+    fun decryptSecret(stored: String?): String? {
+        val raw = stored?.takeIf { it.isNotEmpty() } ?: return null
+        return keyManager?.decryptSecretField(raw) ?: raw
+    }
+
     fun observeServicesWithCounts(): Flow<List<ServiceWithCount>> {
         return combine(
             db.serviceDao().observeAllServices(),
             db.serviceAssetDao().observeAllAssets(),
-            db.accountDao().observeAllAccounts()
-        ) { services, assets, accounts ->
+            db.serviceAccountDao().observeAllServiceAccounts()
+        ) { services, assets, serviceAccounts ->
             val assetMap = assets.associateBy({ it.id }, { it.toDomain() })
-            val accountsByService = accounts.groupBy { it.serviceId }
+            val entriesByService = serviceAccounts.groupBy { it.serviceId }
             services.map { entity ->
-                val linked = accountsByService[entity.id].orEmpty()
+                val linked = entriesByService[entity.id].orEmpty()
                 ServiceWithCount(
                     service = entity.toDomain(),
                     iconAsset = entity.iconAssetId?.let { assetMap[it] },
@@ -93,31 +114,91 @@ class OrganizerRepository(
         }
     }
 
+    /**
+     * Observes standalone core Accounts (defaulting to accounts without any service, e.g.,
+     * example123@gmail.com) along with their category and the list of Services that link to them.
+     */
     fun observeAccountsWithDetails(): Flow<List<AccountWithDetails>> {
         return combine(
             db.accountDao().observeAllAccounts(),
+            db.categoryDao().observeAllCategories(),
+            db.serviceAccountDao().observeAllServiceAccounts(),
             db.serviceDao().observeAllServices(),
-            db.serviceAssetDao().observeAllAssets(),
-            db.categoryDao().observeAllCategories()
-        ) { accounts, services, assets, categories ->
+            db.serviceAssetDao().observeAllAssets()
+        ) { accounts, categories, serviceAccounts, services, assets ->
+            val categoryMap = categories.associateBy({ it.id }, { it.toDomain() })
             val serviceMap = services.associateBy({ it.id }, { it.toDomain() })
             val assetMap = assets.associateBy({ it.id }, { it.toDomain() })
+            val serviceAccountsByLinkedId = serviceAccounts
+                .filter { it.linkedAccountId != null }
+                .groupBy { it.linkedAccountId!! }
+
+            accounts.map { accountEntity ->
+                val domainAccount = accountEntity.toDomain()
+                val category = accountEntity.categoryId?.let { categoryMap[it] }
+                val linkedServiceEntries = serviceAccountsByLinkedId[accountEntity.id]
+                    .orEmpty()
+                    .mapNotNull { saEntity ->
+                        val svc = serviceMap[saEntity.serviceId] ?: return@mapNotNull null
+                        val asset = svc.iconAssetId?.let { assetMap[it] }
+                        val domainSa = saEntity.toDomain()
+                        LinkedServiceSummary(
+                            serviceAccountId = domainSa.id,
+                            service = svc,
+                            serviceAsset = asset,
+                            entryLabel = domainSa.displayName,
+                            identifier = domainSa.email ?: domainAccount.email ?: domainSa.username ?: domainAccount.username,
+                            hasOwnPassword = domainSa.hasPassword,
+                            status = domainSa.status
+                        )
+                    }
+
+                AccountWithDetails(
+                    account = domainAccount,
+                    category = category,
+                    linkedServices = linkedServiceEntries
+                )
+            }
+        }
+    }
+
+    /**
+     * Observes all Service-specific Account entries across all Services.
+     */
+    fun observeServiceAccountsWithDetails(): Flow<List<ServiceAccountWithDetails>> {
+        return combine(
+            db.serviceAccountDao().observeAllServiceAccounts(),
+            db.serviceDao().observeAllServices(),
+            db.serviceAssetDao().observeAllAssets(),
+            db.accountDao().observeAllAccounts(),
+            db.categoryDao().observeAllCategories()
+        ) { serviceAccounts, services, assets, standaloneAccounts, categories ->
+            val serviceMap = services.associateBy({ it.id }, { it.toDomain() })
+            val assetMap = assets.associateBy({ it.id }, { it.toDomain() })
+            val accountMap = standaloneAccounts.associateBy({ it.id }, { it.toDomain() })
             val categoryMap = categories.associateBy({ it.id }, { it.toDomain() })
 
-            accounts.mapNotNull { accountEntity ->
-                val service = serviceMap[accountEntity.serviceId] ?: return@mapNotNull null
+            serviceAccounts.mapNotNull { saEntity ->
+                val service = serviceMap[saEntity.serviceId] ?: return@mapNotNull null
                 val asset = service.iconAssetId?.let { assetMap[it] }
-                val category = accountEntity.categoryId?.let { categoryMap[it] }
-                AccountWithDetails(
-                    account = accountEntity.toDomain(),
+                val linkedAccount = saEntity.linkedAccountId?.let { accountMap[it] }
+                val category = saEntity.categoryId?.let { categoryMap[it] }
+                ServiceAccountWithDetails(
+                    serviceAccount = saEntity.toDomain(),
                     service = service,
                     serviceAsset = asset,
+                    linkedAccount = linkedAccount,
                     category = category
                 )
             }
         }
     }
 
+    /**
+     * Dashboard summary counts ONLY standalone core Accounts in [DashboardSummary.totalActiveAccounts]
+     * and [DashboardSummary.totalArchivedAccounts]—Service Account entries do NOT inflate Home screen
+     * account totals.
+     */
     fun observeDashboardSummary(): Flow<DashboardSummary> {
         return combine(
             observeAccountsWithDetails(),
@@ -151,6 +232,23 @@ class OrganizerRepository(
             AppPreferenceEntity(
                 key = PREF_KEY_THEME,
                 value = theme.storageValue,
+                updatedAtEpochMillis = clockMillis()
+            )
+        )
+    }
+
+    fun observeColorPalette(): Flow<AppColorPalette> {
+        return db.appPreferenceDao().observeAllPreferences().map { prefs ->
+            val raw = prefs.firstOrNull { it.key == PREF_KEY_COLOR_PALETTE }?.value
+            AppColorPalette.fromStorage(raw)
+        }
+    }
+
+    suspend fun setColorPalette(palette: AppColorPalette) {
+        db.appPreferenceDao().upsertPreference(
+            AppPreferenceEntity(
+                key = PREF_KEY_COLOR_PALETTE,
+                value = palette.storageValue,
                 updatedAtEpochMillis = clockMillis()
             )
         )
@@ -236,7 +334,7 @@ class OrganizerRepository(
     }
 
     /**
-     * Deletes or resolves a service safely without ever silently cascade-deleting accounts.
+     * Deletes or resolves a service safely without ever silently cascade-deleting service account entries.
      */
     suspend fun deleteOrResolveService(
         serviceId: String,
@@ -245,7 +343,7 @@ class OrganizerRepository(
     ) {
         val database = db
         database.withTransaction {
-            val linkedCount = database.accountDao().countAccountsForService(serviceId)
+            val linkedCount = database.serviceAccountDao().countServiceAccountsForService(serviceId)
             val now = clockMillis()
             if (linkedCount == 0) {
                 database.serviceDao().deleteServiceById(serviceId)
@@ -262,18 +360,18 @@ class OrganizerRepository(
                     }
                     ServiceDeleteResolution.REASSIGN_ACCOUNTS_TO_SERVICE -> {
                         val targetId = requireNotNull(reassignTargetServiceId) {
-                            "A destination service is required to reassign accounts."
+                            "A destination service is required to reassign service accounts."
                         }
                         require(targetId != serviceId) {
                             "Destination service must be different from the deleted service."
                         }
                         val targetExists = database.serviceDao().getServiceById(targetId) != null
                         require(targetExists) { "Destination service does not exist." }
-                        database.accountDao().reassignServiceForAccounts(serviceId, targetId, now)
+                        database.serviceAccountDao().reassignServiceForServiceAccounts(serviceId, targetId, now)
                         database.serviceDao().deleteServiceById(serviceId)
                     }
                     ServiceDeleteResolution.DELETE_SERVICE_AND_ACCOUNTS -> {
-                        database.accountDao().deleteAccountsForService(serviceId)
+                        database.serviceAccountDao().deleteServiceAccountsForService(serviceId)
                         database.serviceDao().deleteServiceById(serviceId)
                     }
                 }
@@ -316,7 +414,7 @@ class OrganizerRepository(
     }
 
     /**
-     * Deletes a category while preserving all accounts (clears or reassigns their categoryId).
+     * Deletes a category while preserving all standalone accounts and service accounts.
      */
     suspend fun deleteCategorySafely(
         categoryId: String,
@@ -330,56 +428,59 @@ class OrganizerRepository(
                 targetCategoryId = reassignToCategoryId,
                 updatedAt = now
             )
+            database.serviceAccountDao().reassignCategoryForServiceAccounts(
+                sourceCategoryId = categoryId,
+                targetCategoryId = reassignToCategoryId,
+                updatedAt = now
+            )
             database.categoryDao().deleteCategoryById(categoryId)
         }
     }
 
+    /**
+     * Saves a standalone core Account (independent of any Service) with its own encrypted password and notes.
+     */
     suspend fun saveAccount(
         existingId: String? = null,
-        serviceId: String,
         displayName: String,
         email: String?,
         username: String?,
+        password: String? = null,
         categoryId: String?,
         purpose: String?,
         recoveryEmailReference: String?,
         recoveryPhoneReference: String?,
-        websiteUrl: String?,
         notes: String?,
         status: AccountStatus
     ): SaveAccountOutcome {
-        val trimmedLabel = displayName.trim()
-        if (trimmedLabel.isEmpty()) {
-            return SaveAccountOutcome.ValidationError("Account label (e.g., Personal, Work) is required.")
+        val cleanedEmail = Normalizer.cleanOptionalText(email)
+        val cleanedUsername = Normalizer.cleanOptionalText(username)
+        val effectiveLabel = displayName.trim().ifEmpty {
+            cleanedEmail ?: cleanedUsername.orEmpty()
         }
-        if (serviceId.isBlank() || db.serviceDao().getServiceById(serviceId) == null) {
-            return SaveAccountOutcome.ValidationError("Please select an existing service for this account.")
+        if (effectiveLabel.isEmpty()) {
+            return SaveAccountOutcome.ValidationError("Please provide an Account Label, Email (e.g. example123@gmail.com), or Username.")
         }
         if (categoryId != null && db.categoryDao().getCategoryById(categoryId) == null) {
             return SaveAccountOutcome.ValidationError("Selected category does not exist.")
         }
-        if (!Normalizer.validateOptionalUrl(websiteUrl)) {
-            return SaveAccountOutcome.ValidationError("Please enter a valid account website URL.")
-        }
 
         val now = clockMillis()
         val existing = existingId?.let { db.accountDao().getAccountById(it) }
-        val cleanedEmail = Normalizer.cleanOptionalText(email)
-        val cleanedUsername = Normalizer.cleanOptionalText(username)
+        val encryptedPwd = encryptSecret(password?.trim()?.takeIf { it.isNotEmpty() })
         val entity = AccountEntity(
             id = existing?.id ?: UUID.randomUUID().toString(),
-            serviceId = serviceId,
-            displayName = trimmedLabel,
-            normalizedDisplayName = Normalizer.normalizeName(trimmedLabel),
+            displayName = effectiveLabel,
+            normalizedDisplayName = Normalizer.normalizeName(effectiveLabel),
             email = cleanedEmail,
             normalizedEmail = Normalizer.normalizeOptionalIdentifier(cleanedEmail),
             username = cleanedUsername,
             normalizedUsername = Normalizer.normalizeOptionalIdentifier(cleanedUsername),
+            encryptedPassword = encryptedPwd,
             categoryId = categoryId,
             purpose = Normalizer.cleanOptionalText(purpose),
             recoveryEmailReference = Normalizer.cleanOptionalText(recoveryEmailReference),
             recoveryPhoneReference = Normalizer.cleanOptionalText(recoveryPhoneReference),
-            websiteUrl = Normalizer.cleanOptionalText(websiteUrl),
             notes = notes?.takeIf { it.isNotBlank() },
             status = status.name,
             createdAtEpochMillis = existing?.createdAtEpochMillis ?: now,
@@ -410,6 +511,95 @@ class OrganizerRepository(
         db.accountDao().deleteAccountById(accountId)
     }
 
+    /**
+     * Saves a Service-specific Account entry under a [serviceId].
+     * Supports linking an existing standalone [AccountEntity] ([linkedAccountId]) OR entering
+     * a custom unlinked email/username/handle, plus an optional encrypted password and notes.
+     */
+    suspend fun saveServiceAccount(
+        existingId: String? = null,
+        serviceId: String,
+        linkedAccountId: String?,
+        displayName: String,
+        email: String?,
+        username: String?,
+        password: String?,
+        categoryId: String?,
+        purpose: String?,
+        recoveryEmailReference: String?,
+        recoveryPhoneReference: String?,
+        websiteUrl: String?,
+        notes: String?,
+        status: AccountStatus
+    ): SaveServiceAccountOutcome {
+        if (serviceId.isBlank() || db.serviceDao().getServiceById(serviceId) == null) {
+            return SaveServiceAccountOutcome.ValidationError("Please select an existing service.")
+        }
+        val linkedAcc = linkedAccountId?.let { db.accountDao().getAccountById(it) }
+        val cleanedEmail = Normalizer.cleanOptionalText(email) ?: linkedAcc?.email
+        val cleanedUsername = Normalizer.cleanOptionalText(username) ?: linkedAcc?.username
+        val trimmedLabel = displayName.trim().ifEmpty {
+            linkedAcc?.displayName ?: cleanedEmail ?: cleanedUsername.orEmpty()
+        }
+        if (trimmedLabel.isEmpty()) {
+            return SaveServiceAccountOutcome.ValidationError("Entry label, linked account, email, or username is required.")
+        }
+        if (categoryId != null && db.categoryDao().getCategoryById(categoryId) == null) {
+            return SaveServiceAccountOutcome.ValidationError("Selected category does not exist.")
+        }
+        if (!Normalizer.validateOptionalUrl(websiteUrl)) {
+            return SaveServiceAccountOutcome.ValidationError("Please enter a valid URL.")
+        }
+
+        val now = clockMillis()
+        val existing = existingId?.let { db.serviceAccountDao().getServiceAccountById(it) }
+        val encryptedPwd = encryptSecret(password?.trim()?.takeIf { it.isNotEmpty() })
+        val entity = ServiceAccountEntity(
+            id = existing?.id ?: UUID.randomUUID().toString(),
+            serviceId = serviceId,
+            linkedAccountId = linkedAcc?.id,
+            displayName = trimmedLabel,
+            normalizedDisplayName = Normalizer.normalizeName(trimmedLabel),
+            email = cleanedEmail,
+            normalizedEmail = Normalizer.normalizeOptionalIdentifier(cleanedEmail),
+            username = cleanedUsername,
+            normalizedUsername = Normalizer.normalizeOptionalIdentifier(cleanedUsername),
+            encryptedPassword = encryptedPwd,
+            categoryId = categoryId,
+            purpose = Normalizer.cleanOptionalText(purpose),
+            recoveryEmailReference = Normalizer.cleanOptionalText(recoveryEmailReference),
+            recoveryPhoneReference = Normalizer.cleanOptionalText(recoveryPhoneReference),
+            websiteUrl = Normalizer.cleanOptionalText(websiteUrl),
+            notes = notes?.takeIf { it.isNotBlank() },
+            status = status.name,
+            createdAtEpochMillis = existing?.createdAtEpochMillis ?: now,
+            updatedAtEpochMillis = now,
+            archivedAtEpochMillis = existing?.archivedAtEpochMillis
+        )
+
+        if (existing == null) {
+            db.serviceAccountDao().insertServiceAccount(entity)
+        } else {
+            db.serviceAccountDao().updateServiceAccount(entity)
+        }
+        return SaveServiceAccountOutcome.Saved(entity.toDomain())
+    }
+
+    suspend fun setServiceAccountArchived(serviceAccountId: String, archived: Boolean) {
+        val existing = db.serviceAccountDao().getServiceAccountById(serviceAccountId) ?: return
+        val now = clockMillis()
+        db.serviceAccountDao().updateServiceAccount(
+            existing.copy(
+                updatedAtEpochMillis = now,
+                archivedAtEpochMillis = if (archived) now else null
+            )
+        )
+    }
+
+    suspend fun deleteServiceAccountPermanently(serviceAccountId: String) {
+        db.serviceAccountDao().deleteServiceAccountById(serviceAccountId)
+    }
+
     suspend fun cleanupOrphanedAssets() {
         val orphans = db.serviceAssetDao().getOrphanedAssets()
         for (orphan in orphans) {
@@ -420,5 +610,6 @@ class OrganizerRepository(
 
     companion object {
         const val PREF_KEY_THEME = "theme_mode"
+        const val PREF_KEY_COLOR_PALETTE = "color_palette"
     }
 }

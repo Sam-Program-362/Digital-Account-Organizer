@@ -20,7 +20,13 @@ enum class AutoLockTimeout(val timeoutMillis: Long, val displayLabel: String) {
 data class PersistedSecurityState(
     val isAppLockEnabled: Boolean,
     val autoLockTimeout: AutoLockTimeout = AutoLockTimeout.IMMEDIATE,
-    val envelopes: Map<EnvelopeType, KeyEnvelope>
+    val envelopes: Map<EnvelopeType, KeyEnvelope>,
+    val isPasswordManagerLockEnabled: Boolean = true,
+    val useMasterPasswordForVault: Boolean = false,
+    val hasDismissedInitialLockSuggestion: Boolean = false,
+    val encryptedRecoveryCodePayload: ByteArray? = null,
+    val encryptedRecoveryCodeNonce: ByteArray? = null,
+    val recoveryCodesDownloadedOnce: Boolean = false
 )
 
 interface KeyEnvelopeStore {
@@ -31,7 +37,8 @@ interface KeyEnvelopeStore {
 
 /**
  * Stores versioned binary key-envelope metadata in app-private storage using atomic temp-file swap.
- * Never persists raw DEK, KEK, master password, or recovery key.
+ * Supports reading v1 and v2 stores and writes v2 stores.
+ * Never persists raw DEK, KEK, master password, or plaintext recovery key.
  */
 class FileKeyEnvelopeStore(
     private val directory: File
@@ -47,7 +54,9 @@ class FileKeyEnvelopeStore(
             val magic = input.readInt()
             require(magic == FILE_MAGIC) { "Corrupt security envelope store header." }
             val version = input.readInt()
-            require(version == STORE_VERSION) { "Unsupported security envelope store version: $version" }
+            require(version == STORE_VERSION_V1 || version == STORE_VERSION) {
+                "Unsupported security envelope store version: $version"
+            }
             val isAppLockEnabled = input.readBoolean()
             val timeoutMillis = input.readLong()
             val count = input.readInt()
@@ -95,11 +104,42 @@ class FileKeyEnvelopeStore(
                     createdAtEpochMillis = createdAt
                 )
             }
-            return PersistedSecurityState(
-                isAppLockEnabled = isAppLockEnabled,
-                autoLockTimeout = AutoLockTimeout.fromMillis(timeoutMillis),
-                envelopes = envelopes
-            )
+
+            return if (version >= STORE_VERSION) {
+                val isPasswordManagerLockEnabled = input.readBoolean()
+                val useMasterPasswordForVault = input.readBoolean()
+                val hasDismissedInitialLockSuggestion = input.readBoolean()
+                val hasEncRecovery = input.readBoolean()
+                val encPayload = if (hasEncRecovery) {
+                    ByteArray(input.readInt()).also { input.readFully(it) }
+                } else {
+                    null
+                }
+                val encNonce = if (hasEncRecovery) {
+                    ByteArray(input.readInt()).also { input.readFully(it) }
+                } else {
+                    null
+                }
+                val downloadedOnce = input.readBoolean()
+
+                PersistedSecurityState(
+                    isAppLockEnabled = isAppLockEnabled,
+                    autoLockTimeout = AutoLockTimeout.fromMillis(timeoutMillis),
+                    envelopes = envelopes,
+                    isPasswordManagerLockEnabled = isPasswordManagerLockEnabled,
+                    useMasterPasswordForVault = useMasterPasswordForVault,
+                    hasDismissedInitialLockSuggestion = hasDismissedInitialLockSuggestion,
+                    encryptedRecoveryCodePayload = encPayload,
+                    encryptedRecoveryCodeNonce = encNonce,
+                    recoveryCodesDownloadedOnce = downloadedOnce
+                )
+            } else {
+                PersistedSecurityState(
+                    isAppLockEnabled = isAppLockEnabled,
+                    autoLockTimeout = AutoLockTimeout.fromMillis(timeoutMillis),
+                    envelopes = envelopes
+                )
+            }
         }
     }
 
@@ -149,6 +189,22 @@ class FileKeyEnvelopeStore(
 
                 out.writeLong(envelope.createdAtEpochMillis)
             }
+
+            // v2 extended security fields
+            out.writeBoolean(state.isPasswordManagerLockEnabled)
+            out.writeBoolean(state.useMasterPasswordForVault)
+            out.writeBoolean(state.hasDismissedInitialLockSuggestion)
+            val payload = state.encryptedRecoveryCodePayload
+            val nonce = state.encryptedRecoveryCodeNonce
+            val hasEncRecovery = payload != null && nonce != null
+            out.writeBoolean(hasEncRecovery)
+            if (hasEncRecovery && payload != null && nonce != null) {
+                out.writeInt(payload.size)
+                out.write(payload)
+                out.writeInt(nonce.size)
+                out.write(nonce)
+            }
+            out.writeBoolean(state.recoveryCodesDownloadedOnce)
             out.flush()
         }
         if (!tempFile.renameTo(stateFile)) {
@@ -165,6 +221,7 @@ class FileKeyEnvelopeStore(
 
     companion object {
         private const val FILE_MAGIC = 0x44414F53 // "DAOS"
-        private const val STORE_VERSION = 1
+        private const val STORE_VERSION_V1 = 1
+        private const val STORE_VERSION = 2
     }
 }

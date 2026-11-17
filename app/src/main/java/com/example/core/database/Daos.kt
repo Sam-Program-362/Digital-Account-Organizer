@@ -98,21 +98,8 @@ interface AccountDao {
     @Query("SELECT * FROM accounts WHERE id = :id LIMIT 1")
     suspend fun getAccountById(id: String): AccountEntity?
 
-    @Query("SELECT * FROM accounts WHERE serviceId = :serviceId ORDER BY updatedAtEpochMillis DESC")
-    suspend fun getAccountsForService(serviceId: String): List<AccountEntity>
-
-    @Query("SELECT COUNT(*) FROM accounts WHERE serviceId = :serviceId")
-    suspend fun countAccountsForService(serviceId: String): Int
-
     @Query("SELECT COUNT(*) FROM accounts WHERE categoryId = :categoryId")
     suspend fun countAccountsForCategory(categoryId: String): Int
-
-    @Query("UPDATE accounts SET serviceId = :targetServiceId, updatedAtEpochMillis = :updatedAt WHERE serviceId = :sourceServiceId")
-    suspend fun reassignServiceForAccounts(
-        sourceServiceId: String,
-        targetServiceId: String,
-        updatedAt: Long
-    )
 
     @Query("UPDATE accounts SET categoryId = :targetCategoryId, updatedAtEpochMillis = :updatedAt WHERE categoryId = :sourceCategoryId")
     suspend fun reassignCategoryForAccounts(
@@ -120,9 +107,6 @@ interface AccountDao {
         targetCategoryId: String?,
         updatedAt: Long
     )
-
-    @Query("DELETE FROM accounts WHERE serviceId = :serviceId")
-    suspend fun deleteAccountsForService(serviceId: String)
 
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insertAccount(account: AccountEntity)
@@ -135,6 +119,56 @@ interface AccountDao {
 
     @Query("DELETE FROM accounts WHERE id = :id")
     suspend fun deleteAccountById(id: String)
+}
+
+@Dao
+interface ServiceAccountDao {
+    @Query("SELECT * FROM service_accounts ORDER BY updatedAtEpochMillis DESC")
+    fun observeAllServiceAccounts(): Flow<List<ServiceAccountEntity>>
+
+    @Query("SELECT * FROM service_accounts ORDER BY updatedAtEpochMillis DESC")
+    suspend fun getAllServiceAccounts(): List<ServiceAccountEntity>
+
+    @Query("SELECT * FROM service_accounts WHERE id = :id LIMIT 1")
+    suspend fun getServiceAccountById(id: String): ServiceAccountEntity?
+
+    @Query("SELECT * FROM service_accounts WHERE serviceId = :serviceId ORDER BY updatedAtEpochMillis DESC")
+    suspend fun getServiceAccountsForService(serviceId: String): List<ServiceAccountEntity>
+
+    @Query("SELECT COUNT(*) FROM service_accounts WHERE serviceId = :serviceId")
+    suspend fun countServiceAccountsForService(serviceId: String): Int
+
+    @Query("SELECT COUNT(*) FROM service_accounts WHERE categoryId = :categoryId")
+    suspend fun countServiceAccountsForCategory(categoryId: String): Int
+
+    @Query("UPDATE service_accounts SET serviceId = :targetServiceId, updatedAtEpochMillis = :updatedAt WHERE serviceId = :sourceServiceId")
+    suspend fun reassignServiceForServiceAccounts(
+        sourceServiceId: String,
+        targetServiceId: String,
+        updatedAt: Long
+    )
+
+    @Query("UPDATE service_accounts SET categoryId = :targetCategoryId, updatedAtEpochMillis = :updatedAt WHERE categoryId = :sourceCategoryId")
+    suspend fun reassignCategoryForServiceAccounts(
+        sourceCategoryId: String,
+        targetCategoryId: String?,
+        updatedAt: Long
+    )
+
+    @Query("DELETE FROM service_accounts WHERE serviceId = :serviceId")
+    suspend fun deleteServiceAccountsForService(serviceId: String)
+
+    @Insert(onConflict = OnConflictStrategy.ABORT)
+    suspend fun insertServiceAccount(serviceAccount: ServiceAccountEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertServiceAccount(serviceAccount: ServiceAccountEntity)
+
+    @Update
+    suspend fun updateServiceAccount(serviceAccount: ServiceAccountEntity)
+
+    @Query("DELETE FROM service_accounts WHERE id = :id")
+    suspend fun deleteServiceAccountById(id: String)
 }
 
 @Dao

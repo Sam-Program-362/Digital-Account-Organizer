@@ -37,11 +37,13 @@ class AppContainer(context: Context) {
     val repository = OrganizerRepository(
         databaseFactory = databaseFactory,
         assetStorage = assetStorage,
+        keyManager = keyManager,
         websiteLogoFetcher = websiteLogoFetcher
     )
     val backupEngine = BackupEngine(
         databaseFactory = databaseFactory,
-        assetStorage = assetStorage
+        assetStorage = assetStorage,
+        keyManager = keyManager
     )
 }
 

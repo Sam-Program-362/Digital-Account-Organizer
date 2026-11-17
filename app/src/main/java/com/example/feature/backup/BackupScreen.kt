@@ -1,5 +1,8 @@
 package com.example.feature.backup
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -18,24 +21,30 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.FileOpen
+import androidx.compose.material.icons.filled.CloudDownload
+import androidx.compose.material.icons.filled.CloudUpload
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.TableView
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -46,73 +55,85 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import com.example.R
+import com.example.core.designsystem.OfflinePrivacyBanner
 import com.example.domain.model.AccountWithDetails
 import com.example.domain.model.CategoryWithCount
 import com.example.domain.model.ServiceWithCount
+import com.example.ui.theme.JetBrainsMonoFontFamily
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun BackupScreen(
+    accounts: List<AccountWithDetails>,
     services: List<ServiceWithCount>,
     categories: List<CategoryWithCount>,
-    accounts: List<AccountWithDetails>,
     stagedBackup: StagedBackupPackage?,
     conflictResolutions: Map<String, ConflictResolution>,
-    onPrepareEncryptedExport: (
-        passphrase: String,
+    generatedExportLockKey: String?,
+    onPrepareAutoLockedBackup: (
         mode: ExportMode,
         selectedAccountIds: Set<String>,
         selectedServiceIds: Set<String>,
         selectedCategoryIds: Set<String>,
-        onReadyForSafSave: () -> Unit,
+        onLockKeyGenerated: (String) -> Unit,
         onError: (String) -> Unit
     ) -> Unit,
-    onWriteEncryptedExportToUri: (Uri) -> Unit,
-    onPrepareCsvExport: (onReadyForSafSave: () -> Unit, onError: (String) -> Unit) -> Unit,
-    onWriteCsvExportToUri: (Uri) -> Unit,
-    onStageBackupFromUri: (Uri, String, (String) -> Unit) -> Unit,
+    onClearGeneratedExportLockKey: () -> Unit,
+    onWritePendingBackupToUri: (Uri) -> Unit,
+    onPreparePlaintextCsv: (onReadyForSafSave: () -> Unit, onError: (String) -> Unit) -> Unit,
+    onWritePendingCsvToUri: (Uri) -> Unit,
+    onStageBackupFromUri: (Uri, String, onError: (String) -> Unit) -> Unit,
     onUpdateConflictResolution: (String, ConflictResolution) -> Unit,
-    onCommitStagedBackup: ((String) -> Unit) -> Unit,
-    onCancelStagedBackup: () -> Unit
+    onCancelStagedBackup: () -> Unit,
+    onCommitStagedBackup: (onError: (String) -> Unit) -> Unit
 ) {
     val context = LocalContext.current
     var selectedExportMode by rememberSaveable { mutableStateOf(ExportMode.FULL) }
+    var selectedAccountIds by remember { mutableStateOf(setOf<String>()) }
     var selectedServiceIds by remember { mutableStateOf(setOf<String>()) }
     var selectedCategoryIds by remember { mutableStateOf(setOf<String>()) }
-    var selectedAccountIds by remember { mutableStateOf(setOf<String>()) }
 
-    var showExportPassphraseDialog by rememberSaveable { mutableStateOf(false) }
+    var showGeneratedKeyModal by remember { mutableStateOf(false) }
+    var confirmedKeySaved by remember { mutableStateOf(false) }
+    var copiedKeyNotice by remember { mutableStateOf(false) }
+
+    var showPlainCsvConfirm by remember { mutableStateOf(false) }
     var pendingImportUri by remember { mutableStateOf<Uri?>(null) }
-    var showCsvWarningDialog by rememberSaveable { mutableStateOf(false) }
-    var errorBanner by remember { mutableStateOf<String?>(null) }
+    var importLockKeyInput by remember { mutableStateOf("") }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
 
-    val createEncryptedDocLauncher = rememberLauncherForActivityResult(
+    val timestamp = remember { SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).format(Date()) }
+
+    val createEncryptedBackupLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/octet-stream")
     ) { uri: Uri? ->
         if (uri != null) {
-            onWriteEncryptedExportToUri(uri)
+            onWritePendingBackupToUri(uri)
+            onClearGeneratedExportLockKey()
         }
     }
 
-    val createCsvDocLauncher = rememberLauncherForActivityResult(
+    val createPlainCsvLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("text/csv")
     ) { uri: Uri? ->
         if (uri != null) {
-            onWriteCsvExportToUri(uri)
+            onWritePendingCsvToUri(uri)
         }
     }
 
-    val openBackupDocLauncher = rememberLauncherForActivityResult(
+    val openBackupDocumentLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
         if (uri != null) {
             pendingImportUri = uri
-            errorBanner = null
+            importLockKeyInput = ""
+            errorMessage = null
         }
     }
 
@@ -127,52 +148,42 @@ fun BackupScreen(
             Column {
                 Text(
                     text = "Backup & Restore",
-                    style = MaterialTheme.typography.headlineSmall
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold
                 )
                 Text(
-                    text = "Portable encrypted .dao-backup archives work across devices without relying on Android Keystore or automatic cloud sync.",
+                    text = "Export locked backups protected by an app-generated Export Lock Key, or import an existing .dao-backup file.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }
 
-        if (errorBanner != null) {
+        item {
+            OfflinePrivacyBanner(
+                noticeText = "When you export a .dao-backup file, the application automatically generates a unique random Export Lock Key (e.g. DAO-XXXX-XXXX-XXXX-XXXX) and encrypts the file with AES-256-GCM + Argon2id. Copy and keep that key—anyone trying to import the file must enter it."
+            )
+        }
+
+        if (errorMessage != null) {
             item {
                 Card(
                     colors = CardDefaults.cardColors(
                         containerColor = MaterialTheme.colorScheme.errorContainer
-                    )
+                    ),
+                    modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(
-                        text = errorBanner!!,
+                        text = errorMessage!!,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onErrorContainer,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(12.dp)
-                            .testTag("backup_error_banner")
+                        modifier = Modifier.padding(12.dp)
                     )
                 }
             }
         }
 
-        // Staged Import Preview & Conflict Resolution Card (shown when a backup file is staged)
-        if (stagedBackup != null) {
-            item {
-                StagedImportReviewCard(
-                    staged = stagedBackup,
-                    resolutions = conflictResolutions,
-                    onUpdateResolution = onUpdateConflictResolution,
-                    onConfirmCommit = {
-                        onCommitStagedBackup { err -> errorBanner = err }
-                    },
-                    onCancel = onCancelStagedBackup
-                )
-            }
-        }
-
-        // Section 1: Encrypted .dao-backup Export
+        // 1. Export Locked .dao-backup Card
         item {
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -185,20 +196,23 @@ fun BackupScreen(
                         .padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
                         Icon(
                             imageVector = Icons.Default.Lock,
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.primary
                         )
-                        Spacer(Modifier.width(10.dp))
                         Column {
                             Text(
-                                text = "Export Encrypted Backup (.dao-backup)",
-                                style = MaterialTheme.typography.titleMedium
+                                text = "Locked Encrypted Backup (.dao-backup)",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold
                             )
                             Text(
-                                text = "Argon2id + AES-256-GCM authenticated archive including custom service logos.",
+                                text = "Includes standalone Accounts, Services, Service Account entries, encrypted Passwords, custom logos, and Recovery Code metadata.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -207,10 +221,8 @@ fun BackupScreen(
 
                     Text(
                         text = "Export Scope",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.primary
+                        style = MaterialTheme.typography.labelLarge
                     )
-
                     FlowRow(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalArrangement = Arrangement.spacedBy(6.dp)
@@ -220,22 +232,37 @@ fun BackupScreen(
                                 selected = selectedExportMode == mode,
                                 onClick = { selectedExportMode = mode },
                                 label = { Text(mode.displayLabel) },
-                                modifier = Modifier.testTag("export_mode_chip_${mode.name}")
+                                modifier = Modifier.testTag("export_mode_${mode.name}")
                             )
                         }
                     }
 
                     when (selectedExportMode) {
-                        ExportMode.FULL -> {
-                            Text(
-                                text = "Includes all ${services.size} service(s), ${accounts.size} account(s), ${categories.size} category(s), and referenced service artwork.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+                        ExportMode.FULL -> Unit
+                        ExportMode.SELECTED_ACCOUNTS -> {
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                accounts.forEach { acc ->
+                                    val selected = acc.account.id in selectedAccountIds
+                                    FilterChip(
+                                        selected = selected,
+                                        onClick = {
+                                            selectedAccountIds = if (selected) {
+                                                selectedAccountIds - acc.account.id
+                                            } else {
+                                                selectedAccountIds + acc.account.id
+                                            }
+                                        },
+                                        label = { Text(acc.account.displayName) }
+                                    )
+                                }
+                            }
                         }
                         ExportMode.SELECTED_SERVICES -> {
                             FlowRow(
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 verticalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
                                 services.forEach { svc ->
@@ -256,7 +283,7 @@ fun BackupScreen(
                         }
                         ExportMode.SELECTED_CATEGORIES -> {
                             FlowRow(
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 verticalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
                                 categories.forEach { cat ->
@@ -275,96 +302,65 @@ fun BackupScreen(
                                 }
                             }
                         }
-                        ExportMode.SELECTED_ACCOUNTS -> {
-                            FlowRow(
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                verticalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                accounts.forEach { acc ->
-                                    val selected = acc.account.id in selectedAccountIds
-                                    FilterChip(
-                                        selected = selected,
-                                        onClick = {
-                                            selectedAccountIds = if (selected) {
-                                                selectedAccountIds - acc.account.id
-                                            } else {
-                                                selectedAccountIds + acc.account.id
-                                            }
-                                        },
-                                        label = { Text("${acc.account.displayName} (${acc.service.name})") }
-                                    )
-                                }
-                            }
-                        }
                     }
 
                     Button(
                         onClick = {
-                            errorBanner = null
-                            showExportPassphraseDialog = true
+                            errorMessage = null
+                            onPrepareAutoLockedBackup(
+                                selectedExportMode,
+                                selectedAccountIds,
+                                selectedServiceIds,
+                                selectedCategoryIds,
+                                {
+                                    confirmedKeySaved = false
+                                    copiedKeyNotice = false
+                                    showGeneratedKeyModal = true
+                                },
+                                { err -> errorMessage = err }
+                            )
                         },
                         modifier = Modifier
                             .fillMaxWidth()
-                            .testTag("start_encrypted_export_button")
+                            .testTag("export_encrypted_backup_button")
                     ) {
-                        Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Icon(Icons.Default.CloudUpload, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(8.dp))
-                        Text("Create Encrypted .dao-backup")
-                    }
-                }
-            }
-        }
-
-        // Section 2: Import Encrypted Backup
-        item {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Default.FileOpen,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.secondary
-                        )
-                        Spacer(Modifier.width(10.dp))
-                        Column {
-                            Text(
-                                text = "Restore / Import Encrypted Backup",
-                                style = MaterialTheme.typography.titleMedium
-                            )
-                            Text(
-                                text = "Validates archive integrity and previews conflicts before writing to your database.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
+                        Text("Generate Export Lock Key & Export .dao-backup")
                     }
 
                     OutlinedButton(
                         onClick = {
-                            openBackupDocLauncher.launch(arrayOf("*/*"))
+                            openBackupDocumentLauncher.launch(arrayOf("*/*"))
                         },
                         modifier = Modifier
                             .fillMaxWidth()
-                            .testTag("select_backup_file_to_import_button")
+                            .testTag("import_encrypted_backup_button")
                     ) {
-                        Icon(Icons.Default.FileOpen, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Icon(Icons.Default.CloudDownload, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(8.dp))
-                        Text("Select .dao-backup File")
+                        Text("Import / Restore .dao-backup")
                     }
                 }
             }
         }
 
-        // Section 3: Optional Plaintext CSV Export
+        // 2. Staged Backup Preview & Conflict Resolution (if staged)
+        if (stagedBackup != null) {
+            item {
+                StagedBackupPreviewCard(
+                    staged = stagedBackup,
+                    resolutions = conflictResolutions,
+                    onUpdateResolution = onUpdateConflictResolution,
+                    onCancel = onCancelStagedBackup,
+                    onCommit = {
+                        onCommitStagedBackup { err -> errorMessage = err }
+                    }
+                )
+            }
+        }
+
+        // 3. Plaintext CSV Audit Export Card
         item {
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -375,22 +371,25 @@ fun BackupScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
                         Icon(
-                            imageVector = Icons.Default.TableView,
+                            imageVector = Icons.Default.Description,
                             contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            tint = MaterialTheme.colorScheme.secondary
                         )
-                        Spacer(Modifier.width(10.dp))
                         Column {
                             Text(
-                                text = "Plaintext CSV Export (Spreadsheet Convenience)",
-                                style = MaterialTheme.typography.titleMedium
+                                text = "Plaintext CSV Inventory Export",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold
                             )
                             Text(
-                                text = "Not a full restorable backup. Does not include custom service logos.",
+                                text = "Exports non-sensitive account & service inventory to a spreadsheet-friendly CSV file. Saved passwords are never included in CSV exports.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -398,96 +397,202 @@ fun BackupScreen(
                     }
 
                     OutlinedButton(
-                        onClick = { showCsvWarningDialog = true },
+                        onClick = { showPlainCsvConfirm = true },
                         modifier = Modifier
                             .fillMaxWidth()
-                            .testTag("export_csv_button")
+                            .testTag("export_plain_csv_button")
                     ) {
-                        Text("Export Plaintext CSV...")
+                        Text("Export Inventory CSV (No Passwords)")
                     }
                 }
             }
         }
     }
 
-    if (showExportPassphraseDialog) {
-        BackupPassphraseDialog(
-            title = "Set Backup Passphrase",
-            subtitle = "Choose a strong passphrase (8+ characters) for this backup file. Keep it safe—this passphrase is independent of Android Keystore so you can restore on another device, and losing it makes the backup unrecoverable.",
-            confirmLabel = "Encrypt & Choose Destination",
-            requireConfirmation = true,
-            onDismiss = { showExportPassphraseDialog = false },
-            onSubmit = { passphrase ->
-                onPrepareEncryptedExport(
-                    passphrase,
-                    selectedExportMode,
-                    selectedAccountIds,
-                    selectedServiceIds,
-                    selectedCategoryIds,
-                    {
-                        showExportPassphraseDialog = false
-                        createEncryptedDocLauncher.launch("organizer-backup.dao-backup")
-                    },
-                    { err -> errorBanner = err }
+    if (showGeneratedKeyModal && !generatedExportLockKey.isNullOrBlank()) {
+        val lockKey = generatedExportLockKey
+        AlertDialog(
+            onDismissRequest = {
+                showGeneratedKeyModal = false
+                onClearGeneratedExportLockKey()
+            },
+            icon = {
+                Icon(
+                    imageVector = Icons.Default.Key,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary
                 )
+            },
+            title = { Text("Save Your Export Lock Key") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        text = "The application generated this random Export Lock Key to lock your .dao-backup file. Copy and save this key—anyone importing this backup file will be asked for it.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+
+                    Surface(
+                        shape = MaterialTheme.shapes.medium,
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(14.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = lockKey,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontFamily = JetBrainsMonoFontFamily,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.testTag("generated_export_lock_key_text")
+                            )
+                            OutlinedButton(
+                                onClick = {
+                                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                    clipboard?.setPrimaryClip(
+                                        ClipData.newPlainText("DAO Export Lock Key", lockKey)
+                                    )
+                                    copiedKeyNotice = true
+                                    confirmedKeySaved = true
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("copy_export_lock_key_button")
+                            ) {
+                                Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text(if (copiedKeyNotice) "Copied to Clipboard!" else "Copy Export Lock Key")
+                            }
+                        }
+                    }
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Checkbox(
+                            checked = confirmedKeySaved,
+                            onCheckedChange = { confirmedKeySaved = it },
+                            modifier = Modifier.testTag("confirm_export_lock_key_checkbox")
+                        )
+                        Text(
+                            text = "I have copied or saved this Export Lock Key.",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showGeneratedKeyModal = false
+                        createEncryptedBackupLauncher.launch("digital_accounts_$timestamp.dao-backup")
+                    },
+                    enabled = confirmedKeySaved,
+                    modifier = Modifier.testTag("save_encrypted_backup_file_button")
+                ) {
+                    Text("Save Locked .dao-backup File")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showGeneratedKeyModal = false
+                        onClearGeneratedExportLockKey()
+                    }
+                ) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    if (showPlainCsvConfirm) {
+        AlertDialog(
+            onDismissRequest = { showPlainCsvConfirm = false },
+            icon = {
+                Icon(
+                    imageVector = Icons.Default.Warning,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.tertiary
+                )
+            },
+            title = { Text("Export Unencrypted CSV?") },
+            text = {
+                Text(
+                    "Plaintext CSV files are readable by any spreadsheet app. Saved passwords are automatically excluded from CSV exports. Continue?"
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showPlainCsvConfirm = false
+                        onPreparePlaintextCsv(
+                            { createPlainCsvLauncher.launch("digital_accounts_$timestamp.csv") },
+                            { err -> errorMessage = err }
+                        )
+                    },
+                    modifier = Modifier.testTag("confirm_plain_csv_export_button")
+                ) {
+                    Text("Export CSV")
+                }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { showPlainCsvConfirm = false }) {
+                    Text("Cancel")
+                }
             }
         )
     }
 
     val importUri = pendingImportUri
     if (importUri != null) {
-        BackupPassphraseDialog(
-            title = "Enter Backup Passphrase",
-            subtitle = "Enter the backup passphrase used when this .dao-backup file was created to decrypt and preview its contents.",
-            confirmLabel = "Decrypt & Preview",
-            requireConfirmation = false,
-            onDismiss = { pendingImportUri = null },
-            onSubmit = { passphrase ->
-                val targetUri = importUri
-                pendingImportUri = null
-                onStageBackupFromUri(targetUri, passphrase) { err ->
-                    errorBanner = err
-                }
-            }
-        )
-    }
-
-    if (showCsvWarningDialog) {
         AlertDialog(
-            onDismissRequest = { showCsvWarningDialog = false },
-            title = {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Default.Warning,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.error
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text(stringResource(R.string.csv_warning_title))
-                }
-            },
+            onDismissRequest = { pendingImportUri = null },
+            title = { Text("Enter Export Lock Key to Import") },
             text = {
-                Text(
-                    text = stringResource(R.string.csv_warning_body),
-                    style = MaterialTheme.typography.bodyMedium
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        text = "Enter or paste the Export Lock Key (e.g., DAO-XXXX-XXXX-XXXX-XXXX) that the application generated when this .dao-backup file was created.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    OutlinedTextField(
+                        value = importLockKeyInput,
+                        onValueChange = { importLockKeyInput = it },
+                        label = { Text("Export Lock Key") },
+                        placeholder = { Text("DAO-XXXX-XXXX-XXXX-XXXX") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("import_lock_key_input")
+                    )
+                }
             },
             confirmButton = {
                 Button(
                     onClick = {
-                        showCsvWarningDialog = false
-                        onPrepareCsvExport(
-                            { createCsvDocLauncher.launch("digital-accounts-export.csv") },
-                            { err -> errorBanner = err }
-                        )
+                        val targetUri = importUri
+                        val key = importLockKeyInput.trim()
+                        pendingImportUri = null
+                        onStageBackupFromUri(targetUri, key) { err ->
+                            errorMessage = err
+                        }
                     },
-                    modifier = Modifier.testTag("confirm_csv_export_button")
+                    enabled = importLockKeyInput.trim().isNotEmpty(),
+                    modifier = Modifier.testTag("confirm_stage_backup_button")
                 ) {
-                    Text("I Understand — Export CSV")
+                    Text("Unlock & Preview Import")
                 }
             },
             dismissButton = {
-                OutlinedButton(onClick = { showCsvWarningDialog = false }) {
+                OutlinedButton(onClick = { pendingImportUri = null }) {
                     Text("Cancel")
                 }
             }
@@ -497,88 +602,63 @@ fun BackupScreen(
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun StagedImportReviewCard(
+private fun StagedBackupPreviewCard(
     staged: StagedBackupPackage,
     resolutions: Map<String, ConflictResolution>,
     onUpdateResolution: (String, ConflictResolution) -> Unit,
-    onConfirmCommit: () -> Unit,
-    onCancel: () -> Unit
+    onCancel: () -> Unit,
+    onCommit: () -> Unit
 ) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .testTag("staged_import_preview_card"),
+            .testTag("staged_backup_preview_card"),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.35f)
         ),
-        border = BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary)
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary)
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Text(
-                text = "Import Preview & Conflict Resolution",
-                style = MaterialTheme.typography.titleLarge,
+                text = "Backup Unlocked — Ready to Import",
+                style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold
             )
             Text(
-                text = "Backup created at ${staged.exportedAtIso.ifBlank { "Unknown" }} • Schema v${staged.dataSchemaVersion}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Text(
-                text = "New records ready to add: ${staged.newServicesCount} service(s), ${staged.newCategoriesCount} category(s), ${staged.newAccountsCount} account(s), ${staged.assetBytesById.size} logo asset(s).",
-                style = MaterialTheme.typography.bodyMedium
+                text = "Exported at ${staged.exportedAtIso} • ${staged.accounts.size} standalone account(s), ${staged.serviceAccounts.size} service entry(s), ${staged.services.size} service(s), ${staged.categories.size} category(s).",
+                style = MaterialTheme.typography.bodySmall
             )
 
             if (staged.conflicts.isNotEmpty()) {
+                HorizontalDivider()
                 Text(
-                    text = "Conflicts & Potential Duplicates (${staged.conflicts.size}) — Default is Skip so existing records are never overwritten silently:",
+                    text = "Conflicts Detected (${staged.conflicts.size})",
                     style = MaterialTheme.typography.labelLarge,
                     color = MaterialTheme.colorScheme.primary
                 )
-
                 staged.conflicts.forEach { conflict ->
-                    val currentChoice = resolutions[conflict.incomingId] ?: ConflictResolution.SKIP
-                    Surface(
-                        shape = MaterialTheme.shapes.small,
-                        color = MaterialTheme.colorScheme.surface,
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)),
-                        modifier = Modifier.fillMaxWidth()
+                    val currentChoice = resolutions[conflict.incomingId] ?: conflict.defaultResolution
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(12.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            Text(
-                                text = conflict.title,
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                            Text(
-                                text = "${conflict.kind.displayLabel} — ${conflict.subtitle}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            FlowRow(
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                ConflictResolution.entries.forEach { option ->
-                                    FilterChip(
-                                        selected = currentChoice == option,
-                                        onClick = { onUpdateResolution(conflict.incomingId, option) },
-                                        label = { Text(option.displayLabel) },
-                                        modifier = Modifier.testTag(
-                                            "conflict_choice_${conflict.incomingId}_${option.name}"
-                                        )
-                                    )
-                                }
+                        Text(
+                            text = "${conflict.recordType}: ${conflict.title} (${conflict.kind.displayLabel})",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            ConflictResolution.entries.forEach { res ->
+                                FilterChip(
+                                    selected = currentChoice == res,
+                                    onClick = { onUpdateResolution(conflict.incomingId, res) },
+                                    label = { Text(res.displayLabel) }
+                                )
                             }
                         }
                     }
@@ -587,104 +667,23 @@ private fun StagedImportReviewCard(
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 OutlinedButton(
                     onClick = onCancel,
-                    modifier = Modifier.testTag("cancel_staged_import_button")
+                    modifier = Modifier.weight(1f)
                 ) {
-                    Text("Cancel Import")
+                    Text("Cancel")
                 }
-                Spacer(Modifier.width(10.dp))
                 Button(
-                    onClick = onConfirmCommit,
-                    modifier = Modifier.testTag("commit_staged_import_button")
+                    onClick = onCommit,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("commit_staged_backup_button")
                 ) {
-                    Text("Apply Import Transactionally")
+                    Text("Commit Import")
                 }
             }
         }
     }
-}
-
-@Composable
-private fun BackupPassphraseDialog(
-    title: String,
-    subtitle: String,
-    confirmLabel: String,
-    requireConfirmation: Boolean,
-    onDismiss: () -> Unit,
-    onSubmit: (String) -> Unit
-) {
-    var passphrase by remember { mutableStateOf("") }
-    var confirmPassphrase by remember { mutableStateOf("") }
-    var localError by remember { mutableStateOf<String?>(null) }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(title) },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(subtitle, style = MaterialTheme.typography.bodySmall)
-                OutlinedTextField(
-                    value = passphrase,
-                    onValueChange = {
-                        passphrase = it
-                        localError = null
-                    },
-                    label = { Text("Backup Passphrase") },
-                    singleLine = true,
-                    visualTransformation = PasswordVisualTransformation(),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("backup_passphrase_input")
-                )
-                if (requireConfirmation) {
-                    OutlinedTextField(
-                        value = confirmPassphrase,
-                        onValueChange = {
-                            confirmPassphrase = it
-                            localError = null
-                        },
-                        label = { Text("Confirm Backup Passphrase") },
-                        singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("backup_confirm_passphrase_input")
-                    )
-                }
-                if (localError != null) {
-                    Text(
-                        text = localError!!,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error
-                    )
-                }
-            }
-        },
-        confirmButton = {
-            Button(
-                onClick = {
-                    when {
-                        passphrase.length < BackupEngine.MIN_BACKUP_PASSPHRASE_CHARS -> {
-                            localError = "Passphrase must be at least ${BackupEngine.MIN_BACKUP_PASSPHRASE_CHARS} characters."
-                        }
-                        requireConfirmation && passphrase != confirmPassphrase -> {
-                            localError = "Passphrases do not match."
-                        }
-                        else -> onSubmit(passphrase)
-                    }
-                },
-                modifier = Modifier.testTag("submit_backup_passphrase_button")
-            ) {
-                Text(confirmLabel)
-            }
-        },
-        dismissButton = {
-            OutlinedButton(onClick = onDismiss) {
-                Text("Cancel")
-            }
-        }
-    )
 }

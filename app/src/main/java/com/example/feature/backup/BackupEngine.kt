@@ -7,10 +7,12 @@ import com.example.core.database.AppPreferenceEntity
 import com.example.core.database.CategoryEntity
 import com.example.core.database.EncryptedDatabaseFactory
 import com.example.core.database.OrganizerRepository
+import com.example.core.database.ServiceAccountEntity
 import com.example.core.database.ServiceAssetEntity
 import com.example.core.database.ServiceEntity
 import com.example.core.files.ServiceAssetStorage
 import com.example.core.security.Argon2idKeyDeriver
+import com.example.core.security.DatabaseKeyManager
 import com.example.core.security.KdfParameters
 import com.example.core.security.clearBytes
 import com.example.domain.model.AccountStatus
@@ -33,8 +35,8 @@ import org.json.JSONObject
 
 enum class ExportMode(val displayLabel: String) {
     FULL("Full Organizer Backup"),
-    SELECTED_ACCOUNTS("Selected Accounts"),
-    SELECTED_SERVICES("Selected Services"),
+    SELECTED_ACCOUNTS("Selected Standalone Accounts"),
+    SELECTED_SERVICES("Selected Services & Entries"),
     SELECTED_CATEGORIES("Selected Categories")
 }
 
@@ -58,7 +60,7 @@ enum class ConflictResolution(val displayLabel: String) {
 }
 
 data class StagedRecordConflict(
-    val recordType: String, // "SERVICE", "CATEGORY", "ACCOUNT"
+    val recordType: String, // "SERVICE", "CATEGORY", "ACCOUNT", "SERVICE_ACCOUNT"
     val incomingId: String,
     val localMatchId: String?,
     val title: String,
@@ -73,19 +75,24 @@ data class StagedBackupPackage(
     val services: List<ServiceEntity>,
     val categories: List<CategoryEntity>,
     val accounts: List<AccountEntity>,
+    val serviceAccounts: List<ServiceAccountEntity> = emptyList(),
     val preferences: List<AppPreferenceEntity>,
     val assetBytesById: Map<String, ByteArray>,
     val assetChecksumById: Map<String, String>,
     val conflicts: List<StagedRecordConflict>,
     val newServicesCount: Int,
     val newCategoriesCount: Int,
-    val newAccountsCount: Int
+    val newAccountsCount: Int,
+    val newServiceAccountsCount: Int = 0,
+    val exportedRecoveryCode: String? = null,
+    val exportedRecoveryDownloadedOnce: Boolean = false
 )
 
 data class CommitImportSummary(
     val importedServices: Int,
     val importedCategories: Int,
     val importedAccounts: Int,
+    val importedServiceAccounts: Int = 0,
     val skippedRecords: Int,
     val replacedRecords: Int
 )
@@ -93,10 +100,27 @@ data class CommitImportSummary(
 class BackupEngine(
     private val databaseFactory: EncryptedDatabaseFactory,
     private val assetStorage: ServiceAssetStorage,
+    private val keyManager: DatabaseKeyManager? = null,
     private val argon2Deriver: Argon2idKeyDeriver = Argon2idKeyDeriver(),
     private val secureRandom: SecureRandom = SecureRandom(),
     private val clockMillis: () -> Long = { System.currentTimeMillis() }
 ) {
+    /**
+     * Generates a random, high-entropy Export Lock Key (e.g. `DAO-7K9P-M4X2-R8W5-Q3N6`)
+     * used to lock and encrypt `.dao-backup` exports automatically.
+     */
+    fun generateExportLockKey(): String {
+        val sb = StringBuilder("DAO")
+        repeat(4) {
+            sb.append('-')
+            repeat(4) {
+                val idx = secureRandom.nextInt(EXPORT_KEY_ALPHABET.length)
+                sb.append(EXPORT_KEY_ALPHABET[idx])
+            }
+        }
+        return sb.toString()
+    }
+
     /**
      * Creates an encrypted `.dao-backup` container as bytes ready to write via SAF.
      */
@@ -105,51 +129,69 @@ class BackupEngine(
         selection: ExportSelection = ExportSelection(),
         kdfParameters: KdfParameters = KdfParameters()
     ): ByteArray {
-        require(passphrase.size >= MIN_BACKUP_PASSPHRASE_CHARS) {
-            "Backup passphrase must be at least $MIN_BACKUP_PASSPHRASE_CHARS characters."
+        val normalizedPassphrase = normalizePassphraseIfExportKey(passphrase)
+        require(normalizedPassphrase.size >= MIN_BACKUP_PASSPHRASE_CHARS) {
+            "Backup lock key / passphrase must be at least $MIN_BACKUP_PASSPHRASE_CHARS characters."
         }
         val db = databaseFactory.getUnlockedDatabase()
         val allServices = db.serviceDao().getAllServices()
         val allCategories = db.categoryDao().getAllCategories()
         val allAccounts = db.accountDao().getAllAccounts()
+        val allServiceAccounts = db.serviceAccountDao().getAllServiceAccounts()
         val allAssets = db.serviceAssetDao().getAllAssets()
         val allPrefs = db.appPreferenceDao().getAllPreferences()
             .filter { it.key in ALLOWLISTED_PREF_KEYS }
 
-        val (exportServices, exportCategories, exportAccounts, exportPrefs) = when (selection.mode) {
-            ExportMode.FULL -> Quad(allServices, allCategories, allAccounts, allPrefs)
+        val (exportServices, exportCategories, exportAccounts, exportServiceAccounts, exportPrefs) = when (selection.mode) {
+            ExportMode.FULL -> Quint(
+                allServices,
+                allCategories,
+                allAccounts,
+                allServiceAccounts,
+                allPrefs
+            )
             ExportMode.SELECTED_ACCOUNTS -> {
                 val chosenAccounts = allAccounts.filter { it.id in selection.selectedAccountIds }
-                val refServiceIds = chosenAccounts.map { it.serviceId }.toSet()
-                val refCategoryIds = chosenAccounts.mapNotNull { it.categoryId }.toSet()
-                Quad(
+                val chosenAccountIds = chosenAccounts.map { it.id }.toSet()
+                val linkedServiceAccounts = allServiceAccounts.filter { it.linkedAccountId in chosenAccountIds }
+                val refServiceIds = linkedServiceAccounts.map { it.serviceId }.toSet()
+                val refCategoryIds = (chosenAccounts.mapNotNull { it.categoryId } +
+                    linkedServiceAccounts.mapNotNull { it.categoryId }).toSet()
+                Quint(
                     allServices.filter { it.id in refServiceIds },
                     allCategories.filter { it.id in refCategoryIds },
                     chosenAccounts,
+                    linkedServiceAccounts,
                     emptyList()
                 )
             }
             ExportMode.SELECTED_SERVICES -> {
                 val chosenServices = allServices.filter { it.id in selection.selectedServiceIds }
                 val serviceIds = chosenServices.map { it.id }.toSet()
-                val linkedAccounts = allAccounts.filter { it.serviceId in serviceIds }
-                val refCategoryIds = linkedAccounts.mapNotNull { it.categoryId }.toSet()
-                Quad(
+                val linkedServiceAccounts = allServiceAccounts.filter { it.serviceId in serviceIds }
+                val linkedAccountIds = linkedServiceAccounts.mapNotNull { it.linkedAccountId }.toSet()
+                val linkedStandaloneAccounts = allAccounts.filter { it.id in linkedAccountIds }
+                val refCategoryIds = (linkedServiceAccounts.mapNotNull { it.categoryId } +
+                    linkedStandaloneAccounts.mapNotNull { it.categoryId }).toSet()
+                Quint(
                     chosenServices,
                     allCategories.filter { it.id in refCategoryIds },
-                    linkedAccounts,
+                    linkedStandaloneAccounts,
+                    linkedServiceAccounts,
                     emptyList()
                 )
             }
             ExportMode.SELECTED_CATEGORIES -> {
                 val chosenCategories = allCategories.filter { it.id in selection.selectedCategoryIds }
                 val categoryIds = chosenCategories.map { it.id }.toSet()
-                val linkedAccounts = allAccounts.filter { it.categoryId in categoryIds }
-                val refServiceIds = linkedAccounts.map { it.serviceId }.toSet()
-                Quad(
+                val linkedStandaloneAccounts = allAccounts.filter { it.categoryId in categoryIds }
+                val linkedServiceAccounts = allServiceAccounts.filter { it.categoryId in categoryIds }
+                val refServiceIds = linkedServiceAccounts.map { it.serviceId }.toSet()
+                Quint(
                     allServices.filter { it.id in refServiceIds },
                     chosenCategories,
-                    linkedAccounts,
+                    linkedStandaloneAccounts,
+                    linkedServiceAccounts,
                     emptyList()
                 )
             }
@@ -162,6 +204,7 @@ class BackupEngine(
             services = exportServices,
             categories = exportCategories,
             accounts = exportAccounts,
+            serviceAccounts = exportServiceAccounts,
             preferences = exportPrefs,
             assets = exportAssets,
             exportMode = selection.mode
@@ -180,7 +223,7 @@ class BackupEngine(
         )
 
         val encryptedPayload = try {
-            argon2Deriver.deriveKey(passphrase, salt, kdfParameters).use { key ->
+            argon2Deriver.deriveKey(normalizedPassphrase, salt, kdfParameters).use { key ->
                 val rawKey = key.copyBytes()
                 try {
                     val cipher = Cipher.getInstance(AES_GCM_TRANSFORMATION)
@@ -234,7 +277,7 @@ class BackupEngine(
     }
 
     /**
-     * Validates, decrypts, and stages an untrusted `.dao-backup` byte array, returning an
+     * Validates, decrypts, and stages an untrusted `.dao-backup` byte array, returning a
      * [StagedBackupPackage] with conflict analysis before any database mutation occurs.
      */
     suspend fun stageAndPreviewEncryptedBackup(
@@ -313,8 +356,9 @@ class BackupEngine(
             payloadEncoding = payloadEncoding
         )
 
+        val normalizedPassphrase = normalizePassphraseIfExportKey(passphrase)
         val decryptedZipBytes = try {
-            argon2Deriver.deriveKey(passphrase, salt, kdfParams).use { key ->
+            argon2Deriver.deriveKey(normalizedPassphrase, salt, kdfParams).use { key ->
                 val rawKey = key.copyBytes()
                 try {
                     val cipher = Cipher.getInstance(AES_GCM_TRANSFORMATION)
@@ -330,7 +374,7 @@ class BackupEngine(
                 }
             }
         } catch (e: GeneralSecurityException) {
-            throw GeneralSecurityException("Incorrect backup passphrase or damaged backup file.", e)
+            throw GeneralSecurityException("Incorrect Export Lock Key / passphrase or damaged backup file.", e)
         }
 
         try {
@@ -351,6 +395,7 @@ class BackupEngine(
         var importedServices = 0
         var importedCategories = 0
         var importedAccounts = 0
+        var importedServiceAccounts = 0
         var skippedRecords = 0
         var replacedRecords = 0
 
@@ -372,6 +417,7 @@ class BackupEngine(
         db.withTransaction {
             val serviceIdRemap = mutableMapOf<String, String>()
             val categoryIdRemap = mutableMapOf<String, String>()
+            val accountIdRemap = mutableMapOf<String, String>()
 
             // 1. Categories
             for (incomingCat in staged.categories) {
@@ -447,27 +493,32 @@ class BackupEngine(
                 }
             }
 
-            // 3. Accounts
+            // 3. Standalone Accounts
             for (incomingAcc in staged.accounts) {
-                val resolvedServiceId = serviceIdRemap[incomingAcc.serviceId] ?: incomingAcc.serviceId
                 val resolvedCategoryId = incomingAcc.categoryId?.let { categoryIdRemap[it] ?: it }
+                val reEncryptedPwd = incomingAcc.encryptedPassword?.let {
+                    keyManager?.encryptSecretField(it) ?: it
+                }
                 val preparedAcc = incomingAcc.copy(
-                    serviceId = resolvedServiceId,
-                    categoryId = resolvedCategoryId
+                    categoryId = resolvedCategoryId,
+                    encryptedPassword = reEncryptedPwd
                 )
                 val conflict = conflictByIncomingId[incomingAcc.id]
                 if (conflict == null) {
                     db.accountDao().insertAccount(preparedAcc)
+                    accountIdRemap[incomingAcc.id] = incomingAcc.id
                     importedAccounts++
                 } else {
                     val choice = resolutionsByIncomingId[incomingAcc.id] ?: conflict.defaultResolution
                     when (choice) {
                         ConflictResolution.SKIP -> {
+                            accountIdRemap[incomingAcc.id] = conflict.localMatchId ?: incomingAcc.id
                             skippedRecords++
                         }
                         ConflictResolution.REPLACE -> {
                             val targetId = conflict.localMatchId ?: incomingAcc.id
                             db.accountDao().upsertAccount(preparedAcc.copy(id = targetId))
+                            accountIdRemap[incomingAcc.id] = targetId
                             replacedRecords++
                         }
                         ConflictResolution.KEEP_BOTH -> {
@@ -478,13 +529,57 @@ class BackupEngine(
                                 normalizedDisplayName = Normalizer.normalizeName("${preparedAcc.displayName} (Imported)")
                             )
                             db.accountDao().upsertAccount(copy)
+                            accountIdRemap[incomingAcc.id] = newId
                             importedAccounts++
                         }
                     }
                 }
             }
 
-            // 4. Allowlisted preferences
+            // 4. Service Accounts
+            for (incomingSa in staged.serviceAccounts) {
+                val resolvedServiceId = serviceIdRemap[incomingSa.serviceId] ?: incomingSa.serviceId
+                val resolvedLinkedAccId = incomingSa.linkedAccountId?.let { accountIdRemap[it] ?: it }
+                val resolvedCategoryId = incomingSa.categoryId?.let { categoryIdRemap[it] ?: it }
+                val reEncryptedPwd = incomingSa.encryptedPassword?.let {
+                    keyManager?.encryptSecretField(it) ?: it
+                }
+                val preparedSa = incomingSa.copy(
+                    serviceId = resolvedServiceId,
+                    linkedAccountId = resolvedLinkedAccId,
+                    categoryId = resolvedCategoryId,
+                    encryptedPassword = reEncryptedPwd
+                )
+                val conflict = conflictByIncomingId[incomingSa.id]
+                if (conflict == null) {
+                    db.serviceAccountDao().insertServiceAccount(preparedSa)
+                    importedServiceAccounts++
+                } else {
+                    val choice = resolutionsByIncomingId[incomingSa.id] ?: conflict.defaultResolution
+                    when (choice) {
+                        ConflictResolution.SKIP -> {
+                            skippedRecords++
+                        }
+                        ConflictResolution.REPLACE -> {
+                            val targetId = conflict.localMatchId ?: incomingSa.id
+                            db.serviceAccountDao().upsertServiceAccount(preparedSa.copy(id = targetId))
+                            replacedRecords++
+                        }
+                        ConflictResolution.KEEP_BOTH -> {
+                            val newId = UUID.randomUUID().toString()
+                            val copy = preparedSa.copy(
+                                id = newId,
+                                displayName = "${preparedSa.displayName} (Imported)",
+                                normalizedDisplayName = Normalizer.normalizeName("${preparedSa.displayName} (Imported)")
+                            )
+                            db.serviceAccountDao().upsertServiceAccount(copy)
+                            importedServiceAccounts++
+                        }
+                    }
+                }
+            }
+
+            // 5. Allowlisted preferences
             for (pref in staged.preferences) {
                 if (pref.key in ALLOWLISTED_PREF_KEYS) {
                     db.appPreferenceDao().upsertPreference(pref)
@@ -492,29 +587,42 @@ class BackupEngine(
             }
         }
 
+        // Restore recovery code metadata if present in backup and local store doesn't have one
+        if (staged.exportedRecoveryCode != null && keyManager != null) {
+            if (keyManager.getDecryptedRecoveryCode() == null) {
+                keyManager.restoreRecoveryCodeFromBackup(
+                    staged.exportedRecoveryCode,
+                    staged.exportedRecoveryDownloadedOnce
+                )
+            }
+        }
+
         return CommitImportSummary(
             importedServices = importedServices,
             importedCategories = importedCategories,
             importedAccounts = importedAccounts,
+            importedServiceAccounts = importedServiceAccounts,
             skippedRecords = skippedRecords,
             replacedRecords = replacedRecords
         )
     }
 
     /**
-     * Generates a properly escaped RFC 4180 CSV export of accounts, services, and categories.
-     * Never includes security metadata or password-like fields.
+     * Generates a properly escaped RFC 4180 CSV export of standalone accounts, service accounts,
+     * services, and categories. Never includes passwords or security metadata.
      */
     suspend fun exportPlaintextCsv(): String {
         val db = databaseFactory.getUnlockedDatabase()
         val servicesById = db.serviceDao().getAllServices().associateBy { it.id }
         val categoriesById = db.categoryDao().getAllCategories().associateBy { it.id }
         val accounts = db.accountDao().getAllAccounts()
+        val serviceAccounts = db.serviceAccountDao().getAllServiceAccounts()
 
         val sb = StringBuilder()
         sb.appendLine(
             listOf(
-                "Account ID",
+                "Record Type",
+                "Record ID",
                 "Service Name",
                 "Service Website",
                 "Account Label",
@@ -534,12 +642,12 @@ class BackupEngine(
         )
 
         for (account in accounts) {
-            val service = servicesById[account.serviceId]
             val category = account.categoryId?.let { categoriesById[it] }
             val row = listOf(
+                "STANDALONE_ACCOUNT",
                 account.id,
-                service?.name.orEmpty(),
-                service?.websiteUrl.orEmpty(),
+                "",
+                "",
                 account.displayName,
                 account.email.orEmpty(),
                 account.username.orEmpty(),
@@ -549,10 +657,35 @@ class BackupEngine(
                 account.purpose.orEmpty(),
                 account.recoveryEmailReference.orEmpty(),
                 account.recoveryPhoneReference.orEmpty(),
-                account.websiteUrl.orEmpty(),
+                "",
                 account.notes.orEmpty(),
                 Instant.ofEpochMilli(account.createdAtEpochMillis).toString(),
                 Instant.ofEpochMilli(account.updatedAtEpochMillis).toString()
+            )
+            sb.appendLine(row.joinToString(",") { escapeCsvCell(it) })
+        }
+
+        for (sa in serviceAccounts) {
+            val service = servicesById[sa.serviceId]
+            val category = sa.categoryId?.let { categoriesById[it] }
+            val row = listOf(
+                "SERVICE_ACCOUNT",
+                sa.id,
+                service?.name.orEmpty(),
+                service?.websiteUrl.orEmpty(),
+                sa.displayName,
+                sa.email.orEmpty(),
+                sa.username.orEmpty(),
+                category?.name.orEmpty(),
+                sa.status,
+                if (sa.archivedAtEpochMillis != null) "Yes" else "No",
+                sa.purpose.orEmpty(),
+                sa.recoveryEmailReference.orEmpty(),
+                sa.recoveryPhoneReference.orEmpty(),
+                sa.websiteUrl.orEmpty(),
+                sa.notes.orEmpty(),
+                Instant.ofEpochMilli(sa.createdAtEpochMillis).toString(),
+                Instant.ofEpochMilli(sa.updatedAtEpochMillis).toString()
             )
             sb.appendLine(row.joinToString(",") { escapeCsvCell(it) })
         }
@@ -565,10 +698,20 @@ class BackupEngine(
         return "\"${value.replace("\"", "\"\"")}\""
     }
 
+    private fun normalizePassphraseIfExportKey(input: CharArray): CharArray {
+        val trimmed = String(input).trim()
+        return if (trimmed.startsWith("DAO-", ignoreCase = true)) {
+            trimmed.uppercase().toCharArray()
+        } else {
+            input
+        }
+    }
+
     private fun buildInnerPayloadZip(
         services: List<ServiceEntity>,
         categories: List<CategoryEntity>,
         accounts: List<AccountEntity>,
+        serviceAccounts: List<ServiceAccountEntity>,
         preferences: List<AppPreferenceEntity>,
         assets: List<ServiceAssetEntity>,
         exportMode: ExportMode
@@ -600,9 +743,16 @@ class BackupEngine(
             put("servicesCount", services.size)
             put("categoriesCount", categories.size)
             put("accountsCount", accounts.size)
+            put("serviceAccountsCount", serviceAccounts.size)
             put("assetsCount", assetPayloads.size)
             put("assets", assetsManifestArray)
         }.toString(2).toByteArray(StandardCharsets.UTF_8)
+
+        val recoveryMeta = if (exportMode == ExportMode.FULL) {
+            keyManager?.exportRecoveryCodeForBackup()
+        } else {
+            null
+        }
 
         val dataJson = JSONObject().apply {
             put(
@@ -647,18 +797,20 @@ class BackupEngine(
                 "accounts",
                 JSONArray().apply {
                     for (a in accounts) {
+                        val plainPassword = a.encryptedPassword?.let {
+                            keyManager?.decryptSecretField(it) ?: it
+                        }
                         put(
                             JSONObject().apply {
                                 put("id", a.id)
-                                put("serviceId", a.serviceId)
                                 put("displayName", a.displayName)
                                 put("email", a.email ?: JSONObject.NULL)
                                 put("username", a.username ?: JSONObject.NULL)
+                                put("password", plainPassword ?: JSONObject.NULL)
                                 put("categoryId", a.categoryId ?: JSONObject.NULL)
                                 put("purpose", a.purpose ?: JSONObject.NULL)
                                 put("recoveryEmailReference", a.recoveryEmailReference ?: JSONObject.NULL)
                                 put("recoveryPhoneReference", a.recoveryPhoneReference ?: JSONObject.NULL)
-                                put("websiteUrl", a.websiteUrl ?: JSONObject.NULL)
                                 put("notes", a.notes ?: JSONObject.NULL)
                                 put("status", a.status)
                                 put("createdAt", Instant.ofEpochMilli(a.createdAtEpochMillis).toString())
@@ -666,6 +818,40 @@ class BackupEngine(
                                 put(
                                     "archivedAt",
                                     a.archivedAtEpochMillis?.let { Instant.ofEpochMilli(it).toString() } ?: JSONObject.NULL
+                                )
+                            }
+                        )
+                    }
+                }
+            )
+            put(
+                "serviceAccounts",
+                JSONArray().apply {
+                    for (sa in serviceAccounts) {
+                        val plainPassword = sa.encryptedPassword?.let {
+                            keyManager?.decryptSecretField(it) ?: it
+                        }
+                        put(
+                            JSONObject().apply {
+                                put("id", sa.id)
+                                put("serviceId", sa.serviceId)
+                                put("linkedAccountId", sa.linkedAccountId ?: JSONObject.NULL)
+                                put("displayName", sa.displayName)
+                                put("email", sa.email ?: JSONObject.NULL)
+                                put("username", sa.username ?: JSONObject.NULL)
+                                put("password", plainPassword ?: JSONObject.NULL)
+                                put("categoryId", sa.categoryId ?: JSONObject.NULL)
+                                put("purpose", sa.purpose ?: JSONObject.NULL)
+                                put("recoveryEmailReference", sa.recoveryEmailReference ?: JSONObject.NULL)
+                                put("recoveryPhoneReference", sa.recoveryPhoneReference ?: JSONObject.NULL)
+                                put("websiteUrl", sa.websiteUrl ?: JSONObject.NULL)
+                                put("notes", sa.notes ?: JSONObject.NULL)
+                                put("status", sa.status)
+                                put("createdAt", Instant.ofEpochMilli(sa.createdAtEpochMillis).toString())
+                                put("updatedAt", Instant.ofEpochMilli(sa.updatedAtEpochMillis).toString())
+                                put(
+                                    "archivedAt",
+                                    sa.archivedAtEpochMillis?.let { Instant.ofEpochMilli(it).toString() } ?: JSONObject.NULL
                                 )
                             }
                         )
@@ -686,6 +872,15 @@ class BackupEngine(
                     }
                 }
             )
+            if (recoveryMeta != null) {
+                put(
+                    "recoveryMetadata",
+                    JSONObject().apply {
+                        put("recoveryCode", recoveryMeta.first)
+                        put("downloadedOnce", recoveryMeta.third)
+                    }
+                )
+            }
         }.toString(2).toByteArray(StandardCharsets.UTF_8)
 
         return ByteArrayOutputStream().use { baos ->
@@ -758,7 +953,7 @@ class BackupEngine(
         )
 
         val schemaVersion = manifestObj.optInt("dataSchemaVersion", -1)
-        require(schemaVersion == CURRENT_DATA_SCHEMA_VERSION) {
+        require(schemaVersion == SCHEMA_V1 || schemaVersion == CURRENT_DATA_SCHEMA_VERSION) {
             "Unsupported backup data schema version: $schemaVersion"
         }
 
@@ -780,7 +975,9 @@ class BackupEngine(
         val servicesArray = dataObj.getJSONArray("services")
         val categoriesArray = dataObj.getJSONArray("categories")
         val accountsArray = dataObj.getJSONArray("accounts")
+        val serviceAccountsArray = dataObj.optJSONArray("serviceAccounts") ?: JSONArray()
         val prefsArray = dataObj.optJSONArray("preferences") ?: JSONArray()
+        val recoveryObj = dataObj.optJSONObject("recoveryMetadata")
 
         require(servicesArray.length() == manifestObj.getInt("servicesCount")) {
             "Service count mismatch against manifest."
@@ -828,29 +1025,96 @@ class BackupEngine(
             val displayName = o.getString("displayName").trim()
             require(displayName.isNotEmpty()) { "Account record has blank displayName." }
             val statusStr = o.getString("status")
-            AccountStatus.valueOf(statusStr) // Validate enum value
+            AccountStatus.valueOf(statusStr)
             val email = o.optNullableString("email")
             val username = o.optNullableString("username")
+            val password = o.optNullableString("password")
             AccountEntity(
                 id = o.getString("id"),
-                serviceId = o.getString("serviceId"),
                 displayName = displayName,
                 normalizedDisplayName = Normalizer.normalizeName(displayName),
                 email = email,
                 normalizedEmail = Normalizer.normalizeOptionalIdentifier(email),
                 username = username,
                 normalizedUsername = Normalizer.normalizeOptionalIdentifier(username),
+                encryptedPassword = password,
                 categoryId = o.optNullableString("categoryId"),
                 purpose = o.optNullableString("purpose"),
                 recoveryEmailReference = o.optNullableString("recoveryEmailReference"),
                 recoveryPhoneReference = o.optNullableString("recoveryPhoneReference"),
-                websiteUrl = o.optNullableString("websiteUrl"),
                 notes = o.optNullableString("notes"),
                 status = statusStr,
                 createdAtEpochMillis = parseIsoInstant(o.getString("createdAt")),
                 updatedAtEpochMillis = parseIsoInstant(o.getString("updatedAt")),
                 archivedAtEpochMillis = o.optNullableString("archivedAt")?.let { parseIsoInstant(it) }
             )
+        }
+
+        val incomingServiceAccounts = if (schemaVersion == SCHEMA_V1) {
+            // In v1 backups, accounts had a serviceId; also map them as service accounts
+            (0 until accountsArray.length()).mapNotNull { idx ->
+                val o = accountsArray.getJSONObject(idx)
+                val svcId = o.optNullableString("serviceId") ?: return@mapNotNull null
+                val displayName = o.getString("displayName").trim()
+                val statusStr = o.getString("status")
+                val email = o.optNullableString("email")
+                val username = o.optNullableString("username")
+                val accId = o.getString("id")
+                ServiceAccountEntity(
+                    id = accId,
+                    serviceId = svcId,
+                    linkedAccountId = accId,
+                    displayName = displayName,
+                    normalizedDisplayName = Normalizer.normalizeName(displayName),
+                    email = email,
+                    normalizedEmail = Normalizer.normalizeOptionalIdentifier(email),
+                    username = username,
+                    normalizedUsername = Normalizer.normalizeOptionalIdentifier(username),
+                    encryptedPassword = null,
+                    categoryId = o.optNullableString("categoryId"),
+                    purpose = o.optNullableString("purpose"),
+                    recoveryEmailReference = o.optNullableString("recoveryEmailReference"),
+                    recoveryPhoneReference = o.optNullableString("recoveryPhoneReference"),
+                    websiteUrl = o.optNullableString("websiteUrl"),
+                    notes = o.optNullableString("notes"),
+                    status = statusStr,
+                    createdAtEpochMillis = parseIsoInstant(o.getString("createdAt")),
+                    updatedAtEpochMillis = parseIsoInstant(o.getString("updatedAt")),
+                    archivedAtEpochMillis = o.optNullableString("archivedAt")?.let { parseIsoInstant(it) }
+                )
+            }
+        } else {
+            (0 until serviceAccountsArray.length()).map { idx ->
+                val o = serviceAccountsArray.getJSONObject(idx)
+                val displayName = o.getString("displayName").trim()
+                require(displayName.isNotEmpty()) { "Service account record has blank displayName." }
+                val statusStr = o.getString("status")
+                AccountStatus.valueOf(statusStr)
+                val email = o.optNullableString("email")
+                val username = o.optNullableString("username")
+                ServiceAccountEntity(
+                    id = o.getString("id"),
+                    serviceId = o.getString("serviceId"),
+                    linkedAccountId = o.optNullableString("linkedAccountId"),
+                    displayName = displayName,
+                    normalizedDisplayName = Normalizer.normalizeName(displayName),
+                    email = email,
+                    normalizedEmail = Normalizer.normalizeOptionalIdentifier(email),
+                    username = username,
+                    normalizedUsername = Normalizer.normalizeOptionalIdentifier(username),
+                    encryptedPassword = o.optNullableString("password"),
+                    categoryId = o.optNullableString("categoryId"),
+                    purpose = o.optNullableString("purpose"),
+                    recoveryEmailReference = o.optNullableString("recoveryEmailReference"),
+                    recoveryPhoneReference = o.optNullableString("recoveryPhoneReference"),
+                    websiteUrl = o.optNullableString("websiteUrl"),
+                    notes = o.optNullableString("notes"),
+                    status = statusStr,
+                    createdAtEpochMillis = parseIsoInstant(o.getString("createdAt")),
+                    updatedAtEpochMillis = parseIsoInstant(o.getString("updatedAt")),
+                    archivedAtEpochMillis = o.optNullableString("archivedAt")?.let { parseIsoInstant(it) }
+                )
+            }
         }
 
         val incomingPrefs = (0 until prefsArray.length()).mapNotNull { idx ->
@@ -872,11 +1136,13 @@ class BackupEngine(
         val localCategoriesByNorm = db.categoryDao().getAllCategories().associateBy { it.normalizedName }
         val localAccountsById = db.accountDao().getAllAccounts().associateBy { it.id }
         val localAccounts = db.accountDao().getAllAccounts()
+        val localServiceAccountsById = db.serviceAccountDao().getAllServiceAccounts().associateBy { it.id }
 
         val conflicts = mutableListOf<StagedRecordConflict>()
         var newServicesCount = 0
         var newCategoriesCount = 0
         var newAccountsCount = 0
+        var newServiceAccountsCount = 0
 
         for (cat in incomingCategories) {
             val byId = localCategoriesById[cat.id]
@@ -979,19 +1245,43 @@ class BackupEngine(
             }
         }
 
+        for (sa in incomingServiceAccounts) {
+            val byId = localServiceAccountsById[sa.id]
+            if (byId != null) {
+                if (conflicts.none { it.incomingId == sa.id }) {
+                    conflicts.add(
+                        StagedRecordConflict(
+                            recordType = "SERVICE_ACCOUNT",
+                            incomingId = sa.id,
+                            localMatchId = byId.id,
+                            title = "Service Entry: ${sa.displayName}",
+                            subtitle = "Local service entry '${byId.displayName}' shares the same UUID",
+                            kind = ConflictKind.ID_CONFLICT
+                        )
+                    )
+                }
+            } else {
+                newServiceAccountsCount++
+            }
+        }
+
         return StagedBackupPackage(
             exportedAtIso = manifestObj.optString("exportedAt", ""),
             dataSchemaVersion = schemaVersion,
             services = incomingServices,
             categories = incomingCategories,
             accounts = incomingAccounts,
+            serviceAccounts = incomingServiceAccounts,
             preferences = incomingPrefs,
             assetBytesById = assetBytesById,
             assetChecksumById = assetChecksumById,
             conflicts = conflicts,
             newServicesCount = newServicesCount,
             newCategoriesCount = newCategoriesCount,
-            newAccountsCount = newAccountsCount
+            newAccountsCount = newAccountsCount,
+            newServiceAccountsCount = newServiceAccountsCount,
+            exportedRecoveryCode = recoveryObj?.optNullableString("recoveryCode"),
+            exportedRecoveryDownloadedOnce = recoveryObj?.optBoolean("downloadedOnce", false) ?: false
         )
     }
 
@@ -1048,18 +1338,26 @@ class BackupEngine(
     private fun parseIsoInstant(iso: String): Long =
         Instant.parse(iso).toEpochMilli()
 
-    private data class Quad<A, B, C, D>(val first: A, val second: B, val third: C, val fourth: D)
+    private data class Quint<A, B, C, D, E>(
+        val first: A,
+        val second: B,
+        val third: C,
+        val fourth: D,
+        val fifth: E
+    )
 
     companion object {
         const val FORMAT_ID = "digital-account-organizer-backup"
         const val CURRENT_FORMAT_VERSION = 1
-        const val CURRENT_DATA_SCHEMA_VERSION = 1
+        private const val SCHEMA_V1 = 1
+        const val CURRENT_DATA_SCHEMA_VERSION = 2
         const val CIPHER_ID = "AES-256-GCM"
         const val PAYLOAD_ENCODING_ID = "zip-utf8"
         const val ENTRY_HEADER_JSON = "header.json"
         const val ENTRY_PAYLOAD_ENC = "payload.enc"
 
         const val MIN_BACKUP_PASSPHRASE_CHARS = 8
+        private const val EXPORT_KEY_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
         private const val AES_GCM_TRANSFORMATION = "AES/GCM/NoPadding"
         private const val GCM_NONCE_BYTES = 12
         private const val GCM_TAG_BITS = 128
@@ -1069,6 +1367,9 @@ class BackupEngine(
         private const val MAX_DECOMPRESSED_TOTAL_BYTES = 64 * 1024 * 1024 // 64 MiB
         private const val MAX_INNER_ENTRIES = 512
 
-        val ALLOWLISTED_PREF_KEYS = setOf(OrganizerRepository.PREF_KEY_THEME)
+        val ALLOWLISTED_PREF_KEYS = setOf(
+            OrganizerRepository.PREF_KEY_THEME,
+            OrganizerRepository.PREF_KEY_COLOR_PALETTE
+        )
     }
 }

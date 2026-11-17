@@ -7,6 +7,7 @@ import androidx.room.PrimaryKey
 import com.example.domain.model.AccountRecord
 import com.example.domain.model.AccountStatus
 import com.example.domain.model.CategoryRecord
+import com.example.domain.model.ServiceAccountRecord
 import com.example.domain.model.ServiceAssetRecord
 import com.example.domain.model.ServiceRecord
 
@@ -100,15 +101,13 @@ data class CategoryEntity(
     )
 }
 
+/**
+ * Standalone core Account entity (e.g., example123@gmail.com, example321@example.com)
+ * independent of any Service, storing its own encrypted password and notes.
+ */
 @Entity(
     tableName = "accounts",
     foreignKeys = [
-        ForeignKey(
-            entity = ServiceEntity::class,
-            parentColumns = ["id"],
-            childColumns = ["serviceId"],
-            onDelete = ForeignKey.RESTRICT
-        ),
         ForeignKey(
             entity = CategoryEntity::class,
             parentColumns = ["id"],
@@ -117,7 +116,6 @@ data class CategoryEntity(
         )
     ],
     indices = [
-        Index(value = ["serviceId"]),
         Index(value = ["categoryId"]),
         Index(value = ["status"]),
         Index(value = ["archivedAtEpochMillis"]),
@@ -129,13 +127,94 @@ data class CategoryEntity(
 )
 data class AccountEntity(
     @PrimaryKey val id: String,
-    val serviceId: String,
     val displayName: String,
     val normalizedDisplayName: String,
     val email: String?,
     val normalizedEmail: String?,
     val username: String?,
     val normalizedUsername: String?,
+    val encryptedPassword: String?,
+    val categoryId: String?,
+    val purpose: String?,
+    val recoveryEmailReference: String?,
+    val recoveryPhoneReference: String?,
+    val notes: String?,
+    val status: String,
+    val createdAtEpochMillis: Long,
+    val updatedAtEpochMillis: Long,
+    val archivedAtEpochMillis: Long?
+) {
+    fun toDomain(): AccountRecord = AccountRecord(
+        id = id,
+        displayName = displayName,
+        normalizedDisplayName = normalizedDisplayName,
+        email = email,
+        normalizedEmail = normalizedEmail,
+        username = username,
+        normalizedUsername = normalizedUsername,
+        encryptedPassword = encryptedPassword,
+        categoryId = categoryId,
+        purpose = purpose,
+        recoveryEmailReference = recoveryEmailReference,
+        recoveryPhoneReference = recoveryPhoneReference,
+        notes = notes,
+        status = runCatching { AccountStatus.valueOf(status) }.getOrDefault(AccountStatus.ACTIVE),
+        createdAtEpochMillis = createdAtEpochMillis,
+        updatedAtEpochMillis = updatedAtEpochMillis,
+        archivedAtEpochMillis = archivedAtEpochMillis
+    )
+}
+
+/**
+ * Service-specific Account entry belonging to a particular [ServiceEntity].
+ * Can optionally reference a standalone [AccountEntity] via [linkedAccountId] OR use a custom
+ * unlinked email/username/handle, with its own optional encrypted password and notes.
+ */
+@Entity(
+    tableName = "service_accounts",
+    foreignKeys = [
+        ForeignKey(
+            entity = ServiceEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["serviceId"],
+            onDelete = ForeignKey.RESTRICT
+        ),
+        ForeignKey(
+            entity = AccountEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["linkedAccountId"],
+            onDelete = ForeignKey.SET_NULL
+        ),
+        ForeignKey(
+            entity = CategoryEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["categoryId"],
+            onDelete = ForeignKey.SET_NULL
+        )
+    ],
+    indices = [
+        Index(value = ["serviceId"]),
+        Index(value = ["linkedAccountId"]),
+        Index(value = ["categoryId"]),
+        Index(value = ["status"]),
+        Index(value = ["archivedAtEpochMillis"]),
+        Index(value = ["updatedAtEpochMillis"]),
+        Index(value = ["normalizedDisplayName"]),
+        Index(value = ["normalizedEmail"]),
+        Index(value = ["normalizedUsername"])
+    ]
+)
+data class ServiceAccountEntity(
+    @PrimaryKey val id: String,
+    val serviceId: String,
+    val linkedAccountId: String?,
+    val displayName: String,
+    val normalizedDisplayName: String,
+    val email: String?,
+    val normalizedEmail: String?,
+    val username: String?,
+    val normalizedUsername: String?,
+    val encryptedPassword: String?,
     val categoryId: String?,
     val purpose: String?,
     val recoveryEmailReference: String?,
@@ -147,15 +226,17 @@ data class AccountEntity(
     val updatedAtEpochMillis: Long,
     val archivedAtEpochMillis: Long?
 ) {
-    fun toDomain(): AccountRecord = AccountRecord(
+    fun toDomain(): ServiceAccountRecord = ServiceAccountRecord(
         id = id,
         serviceId = serviceId,
+        linkedAccountId = linkedAccountId,
         displayName = displayName,
         normalizedDisplayName = normalizedDisplayName,
         email = email,
         normalizedEmail = normalizedEmail,
         username = username,
         normalizedUsername = normalizedUsername,
+        encryptedPassword = encryptedPassword,
         categoryId = categoryId,
         purpose = purpose,
         recoveryEmailReference = recoveryEmailReference,

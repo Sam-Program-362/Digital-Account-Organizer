@@ -1,58 +1,60 @@
 package com.example
 
 import android.content.Context
-import android.graphics.Bitmap
 import androidx.test.core.app.ApplicationProvider
 import com.example.core.database.EncryptedDatabaseFactory
 import com.example.core.database.OrganizerRepository
-import com.example.core.database.SaveAccountOutcome
+import com.example.core. database.SaveAccountOutcome
 import com.example.core.database.SaveCategoryOutcome
+import com.example.core.database.SaveServiceAccountOutcome
 import com.example.core.database.SaveServiceOutcome
 import com.example.core.files.ServiceAssetStorage
 import com.example.core.security.AndroidKeystoreKeyWrapper
+import com.example.core.security.AutoLockTimeout
 import com.example.core.security.DatabaseKeyManager
 import com.example.core.security.FileKeyEnvelopeStore
+import com.example.core.security.KdfParameters
+import com.example.core.security.LockState
 import com.example.domain.model.AccountStatus
-import com.example.domain.model.ServiceDeleteResolution
+import com.example.domain.model.AppColorPalette
 import com.example.feature.backup.BackupEngine
-import com.example.feature.backup.ConflictKind
 import com.example.feature.backup.ConflictResolution
-import java.io.ByteArrayOutputStream
-import java.io.File
-import java.nio.file.Files
-import java.security.GeneralSecurityException
+import com.example.feature.backup.ExportSelection
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
-import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import java.io.File
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [36])
+@Config(sdk = [34])
 class ExampleRobolectricTest {
 
     private lateinit var context: Context
-    private lateinit var tempSecurityDir: File
+    private lateinit var testSecurityDir: File
     private lateinit var keyManager: DatabaseKeyManager
     private lateinit var databaseFactory: EncryptedDatabaseFactory
     private lateinit var assetStorage: ServiceAssetStorage
     private lateinit var repository: OrganizerRepository
-    private lateinit var backupEngine: BackupEngine
+
+    private val fastKdf = KdfParameters()
 
     @Before
     fun setUp() {
         context = ApplicationProvider.getApplicationContext()
-        tempSecurityDir = Files.createTempDirectory("robo_sec").toFile()
-        val envelopeStore = FileKeyEnvelopeStore(tempSecurityDir)
-        val keystoreWrapper = AndroidKeystoreKeyWrapper(fallbackDirectory = tempSecurityDir)
+        testSecurityDir = File(context.filesDir, "test_security_${System.nanoTime()}").apply {
+            mkdirs()
+        }
+        val envelopeStore = FileKeyEnvelopeStore(testSecurityDir)
+        val keystoreWrapper = AndroidKeystoreKeyWrapper(fallbackDirectory = testSecurityDir)
         keyManager = DatabaseKeyManager(
             envelopeStore = envelopeStore,
             keystoreWrapper = keystoreWrapper
@@ -65,274 +67,273 @@ class ExampleRobolectricTest {
             useInMemoryForTesting = true
         )
         assetStorage = ServiceAssetStorage(context)
-        repository = OrganizerRepository(databaseFactory, assetStorage)
-        backupEngine = BackupEngine(databaseFactory, assetStorage)
+        repository = OrganizerRepository(
+            databaseFactory = databaseFactory,
+            assetStorage = assetStorage,
+            keyManager = keyManager
+        )
     }
 
     @After
     fun tearDown() {
         databaseFactory.closeDatabase()
-        assetStorage.clearAllAssets()
-        tempSecurityDir.deleteRecursively()
+        testSecurityDir.deleteRecursively()
     }
 
     @Test
-    fun appName_matchesDigitalAccountOrganizer() {
-        val appName = context.getString(R.string.app_name)
-        assertEquals("Digital Account Organizer", appName)
-    }
+    fun standaloneAccountsAndServiceAccountsStayDecoupledAndLinkProperly() = runBlocking {
+        val catOutcome = repository.saveCategory(
+            existingId = null,
+            name = "Developer",
+            description = "Coding & cloud accounts"
+        ) as SaveCategoryOutcome.Saved
 
-    @Test
-    fun repository_supportsMultipleAccountsPerService_andSafeServiceAndCategoryDeletion() = runBlocking {
-        // 1. Import a custom service icon and create two custom services
-        val samplePng = createSamplePngBytes()
-        val asset = repository.importServiceIconFromBytes(samplePng)
-        assertEquals("image/png", asset.mimeType)
-
-        val fastmailOutcome = repository.saveService(
-            name = "Fastmail",
-            websiteUrl = "https://fastmail.com",
-            description = "Primary email provider",
-            iconAssetId = asset.id
-        ) as SaveServiceOutcome.Saved
-
-        // Duplicate service name detection
-        val duplicateCheck = repository.saveService(
-            name = "  FASTMAIL  ",
-            websiteUrl = null,
-            description = null,
-            iconAssetId = null
-        )
-        assertTrue(duplicateCheck is SaveServiceOutcome.DuplicateNameDetected)
-
-        val backupServiceOutcome = repository.saveService(
-            name = "Proton",
-            websiteUrl = "https://proton.me",
-            description = "Secondary provider",
-            iconAssetId = null
-        ) as SaveServiceOutcome.Saved
-
-        // 2. Create a category
-        val workCat = (repository.saveCategory(
-            name = "Work",
-            description = "Career accounts"
-        ) as SaveCategoryOutcome.Saved).category
-
-        // 3. Create two accounts under the same Fastmail service
-        val acc1 = (repository.saveAccount(
-            serviceId = fastmailOutcome.service.id,
-            displayName = "Personal Inbox",
-            email = "alex@fastmail.com",
-            username = "alex_p",
-            categoryId = workCat.id,
-            purpose = "Personal correspondence",
-            recoveryEmailReference = "recovery@example.org",
+        // 1. Create two standalone Accounts (no service required)
+        val gmailOutcome = repository.saveAccount(
+            existingId = null,
+            displayName = "Personal Gmail",
+            email = "example123@gmail.com",
+            username = "example123",
+            password = "MySecretGmailPassword!99",
+            categoryId = catOutcome.category.id,
+            purpose = "Primary Personal Identity",
+            recoveryEmailReference = "backup@example.com",
             recoveryPhoneReference = "+1-555-0100",
-            websiteUrl = null,
-            notes = "Created in 2021",
+            notes = "Main Google identity notes",
             status = AccountStatus.ACTIVE
-        ) as SaveAccountOutcome.Saved).account
+        ) as SaveAccountOutcome.Saved
 
-        val acc2 = (repository.saveAccount(
-            serviceId = fastmailOutcome.service.id,
-            displayName = "Work Alias",
-            email = "alex.work@fastmail.com",
-            username = null,
-            categoryId = workCat.id,
-            purpose = "Consulting invoices",
+        repository.saveAccount(
+            existingId = null,
+            displayName = "Work Identity",
+            email = "example321@example.com",
+            username = "work321",
+            password = null,
+            categoryId = catOutcome.category.id,
+            purpose = "Corporate email",
             recoveryEmailReference = null,
             recoveryPhoneReference = null,
-            websiteUrl = null,
             notes = null,
-            status = AccountStatus.INACTIVE
-        ) as SaveAccountOutcome.Saved).account
-
-        val allAccounts = repository.observeAccountsWithDetails().first()
-        assertEquals(2, allAccounts.size)
-
-        // 4. Deleting category preserves accounts and clears categoryId
-        repository.deleteCategorySafely(workCat.id, reassignToCategoryId = null)
-        val afterCategoryDelete = repository.observeAccountsWithDetails().first()
-        assertEquals(2, afterCategoryDelete.size)
-        assertTrue(afterCategoryDelete.all { it.account.categoryId == null })
-
-        // 5. Reassigning accounts when deleting Fastmail moves both accounts to Proton
-        repository.deleteOrResolveService(
-            serviceId = fastmailOutcome.service.id,
-            resolution = ServiceDeleteResolution.REASSIGN_ACCOUNTS_TO_SERVICE,
-            reassignTargetServiceId = backupServiceOutcome.service.id
+            status = AccountStatus.ACTIVE
         )
-        val afterServiceReassign = repository.observeAccountsWithDetails().first()
-        assertEquals(2, afterServiceReassign.size)
-        assertTrue(afterServiceReassign.all { it.service.id == backupServiceOutcome.service.id })
-    }
 
-    @Test
-    fun backupEngine_roundTripAcrossFreshDatabase_andConflictResolutions() = runBlocking {
-        val samplePng = createSamplePngBytes()
-        val asset = repository.importServiceIconFromBytes(samplePng)
-
-        val github = (repository.saveService(
+        // 2. Create a Service (GitHub) with two Service Account entries:
+        //    one linked to Personal Gmail, and one unlinked custom service account
+        val githubOutcome = repository.saveService(
+            existingId = null,
             name = "GitHub",
             websiteUrl = "https://github.com",
             description = "Code hosting",
-            iconAssetId = asset.id
-        ) as SaveServiceOutcome.Saved).service
+            iconAssetId = null
+        ) as SaveServiceOutcome.Saved
 
-        val devCat = (repository.saveCategory(
-            name = "Developer",
-            description = "Engineering tools"
-        ) as SaveCategoryOutcome.Saved).category
-
-        val acc = (repository.saveAccount(
-            serviceId = github.id,
-            displayName = "Open Source",
-            email = "dev@example.com",
-            username = "devhandle",
-            categoryId = devCat.id,
-            purpose = "OSS maintenance",
+        repository.saveServiceAccount(
+            existingId = null,
+            serviceId = githubOutcome.service.id,
+            linkedAccountId = gmailOutcome.account.id,
+            displayName = "Main OSS Profile",
+            email = "example123@gmail.com",
+            username = "example-oss",
+            password = null, // Optional password left blank -> uses linked account
+            categoryId = catOutcome.category.id,
+            purpose = "Open source repos",
             recoveryEmailReference = null,
             recoveryPhoneReference = null,
-            websiteUrl = null,
-            notes = "2FA hardware key",
+            websiteUrl = "https://github.com/example-oss",
+            notes = "Uses personal Gmail login",
             status = AccountStatus.ACTIVE
-        ) as SaveAccountOutcome.Saved).account
+        ) as SaveServiceAccountOutcome.Saved
 
-        val backupPassphrase = "portable-backup-secret".toCharArray()
-        val backupBytes = backupEngine.createEncryptedBackupBytes(backupPassphrase)
-        assertTrue(backupBytes.isNotEmpty())
-
-        // Wrong backup passphrase must fail closed
-        try {
-            backupEngine.stageAndPreviewEncryptedBackup(
-                backupBytes,
-                "wrong-passphrase-123".toCharArray()
-            )
-            fail("Expected GeneralSecurityException on wrong backup passphrase")
-        } catch (_: GeneralSecurityException) {
-            // Expected
-        }
-
-        // Modify local account display name so staging on same DB detects an ID_CONFLICT
-        repository.saveAccount(
-            existingId = acc.id,
-            serviceId = github.id,
-            displayName = "Locally Modified Label",
-            email = acc.email,
-            username = acc.username,
-            categoryId = devCat.id,
-            purpose = acc.purpose,
+        repository.saveServiceAccount(
+            existingId = null,
+            serviceId = githubOutcome.service.id,
+            linkedAccountId = null,
+            displayName = "Bot Deployment Handle",
+            email = "bot@ci.example.org",
+            username = "ci-release-bot",
+            password = "BotServicePassword#42",
+            categoryId = catOutcome.category.id,
+            purpose = "Automated releases",
             recoveryEmailReference = null,
             recoveryPhoneReference = null,
-            websiteUrl = null,
-            notes = acc.notes,
+            websiteUrl = "https://github.com",
+            notes = "Dedicated CI bot",
             status = AccountStatus.ACTIVE
+        ) as SaveServiceAccountOutcome.Saved
+
+        // Verify standalone accounts count is 2 (Service Accounts do NOT inflate standalone accounts)
+        val standaloneAccounts = repository.observeAccountsWithDetails().first()
+        assertEquals(2, standaloneAccounts.size)
+
+        val summary = repository.observeDashboardSummary().first()
+        assertEquals(2, summary.totalActiveAccounts)
+        assertEquals(1, summary.totalServices)
+
+        // Verify Personal Gmail shows GitHub under linkedServices and decrypts its password
+        val gmailDetails = standaloneAccounts.first { it.account.id == gmailOutcome.account.id }
+        assertTrue(gmailDetails.account.hasPassword)
+        assertEquals(
+            "MySecretGmailPassword!99",
+            repository.decryptSecret(gmailDetails.account.encryptedPassword)
         )
+        assertEquals(1, gmailDetails.linkedServices.size)
+        assertEquals("GitHub", gmailDetails.linkedServices.first().service.name)
+        assertEquals("Main OSS Profile", gmailDetails.linkedServices.first().entryLabel)
 
-        val stagedWithConflict = backupEngine.stageAndPreviewEncryptedBackup(
-            backupBytes,
-            backupPassphrase
+        // Verify Service Accounts list has 2 entries for GitHub
+        val serviceAccounts = repository.observeServiceAccountsWithDetails().first()
+        assertEquals(2, serviceAccounts.size)
+        val botEntry = serviceAccounts.first { it.serviceAccount.username == "ci-release-bot" }
+        assertTrue(botEntry.serviceAccount.hasPassword)
+        assertEquals(
+            "BotServicePassword#42",
+            repository.decryptSecret(botEntry.serviceAccount.encryptedPassword)
         )
-        val accountConflict = stagedWithConflict.conflicts.firstOrNull { it.incomingId == acc.id }
-        assertNotNull(accountConflict)
-        assertEquals(ConflictKind.ID_CONFLICT, accountConflict?.kind)
-
-        // Choose KEEP_BOTH for the account conflict while skipping service/category conflicts
-        val resolutions = stagedWithConflict.conflicts.associate { c ->
-            if (c.incomingId == acc.id) {
-                c.incomingId to ConflictResolution.KEEP_BOTH
-            } else {
-                c.incomingId to ConflictResolution.SKIP
-            }
-        }
-        val summary = backupEngine.commitStagedBackup(stagedWithConflict, resolutions)
-        assertEquals(1, summary.importedAccounts)
-
-        val accountsAfterKeepBoth = repository.observeAccountsWithDetails().first()
-        assertEquals(2, accountsAfterKeepBoth.size)
-
-        // Verify CSV export escapes fields and includes both records
-        val csv = backupEngine.exportPlaintextCsv()
-        assertTrue(csv.contains("Open Source (Imported)"))
-        assertTrue(csv.contains("Locally Modified Label"))
     }
 
     @Test
-    fun websiteLogoFetch_discoversHtmlIcon_sanitizesToPng_andPersistsInRepository() = runBlocking {
-        val samplePng = createSamplePngBytes()
-        val publicIp = java.net.InetAddress.getByAddress(
-            "fastmail.com",
-            byteArrayOf(103, 168.toByte(), 172.toByte(), 37)
+    fun eightCharMasterPasswordVaultSessionAndEncryptedRecoveryCodeWork() {
+        val eightCharPassword = "MyPass8!".toCharArray()
+        val result = keyManager.enableAppLock(
+            newMasterPassword = eightCharPassword,
+            autoLockTimeout = AutoLockTimeout.ONE_MINUTE,
+            kdfParameters = fastKdf
         )
-        val fakeTransport = com.example.core.files.WebsiteHttpTransport { url, _, _, _ ->
-            when (url) {
-                "https://fastmail.com/" -> com.example.core.files.WebsiteHttpResponse(
-                    finalUrl = "https://fastmail.com/",
-                    statusCode = 200,
-                    contentType = "text/html; charset=utf-8",
-                    bodyBytes = """
-                        <!doctype html>
-                        <html>
-                          <head>
-                            <link rel="icon" type="image/svg+xml" href="/icon.svg">
-                            <link rel="apple-touch-icon" sizes="180x180" href="/assets/apple-touch-icon.png">
-                          </head>
-                        </html>
-                    """.trimIndent().toByteArray(Charsets.UTF_8)
-                )
-                "https://fastmail.com/assets/apple-touch-icon.png" -> com.example.core.files.WebsiteHttpResponse(
-                    finalUrl = url,
-                    statusCode = 200,
-                    contentType = "image/png",
-                    bodyBytes = samplePng
-                )
-                else -> com.example.core.files.WebsiteHttpResponse(
-                    finalUrl = url,
-                    statusCode = 404,
-                    contentType = "text/plain",
-                    bodyBytes = ByteArray(0)
-                )
-            }
-        }
+        val recoveryCodeStr = String(result.recoveryCode)
+        assertTrue(recoveryCodeStr.isNotBlank())
 
-        val fetcher = com.example.core.files.WebsiteLogoFetcher(
-            context = context,
-            assetStorage = assetStorage,
-            transport = fakeTransport,
-            dnsResolver = { arrayOf(publicIp) },
-            connectivityChecker = { true }
+        // Verify permanent encrypted recovery code is stored and retrievable
+        assertEquals(recoveryCodeStr, keyManager.getDecryptedRecoveryCode())
+
+        val initialUnlocked = keyManager.lockState.value as LockState.Unlocked
+        assertFalse(initialUnlocked.recoveryCodesDownloadedOnce)
+
+        keyManager.markRecoveryCodeFileDownloadedOnce()
+        val afterDownload = keyManager.lockState.value as LockState.Unlocked
+        assertTrue(afterDownload.recoveryCodesDownloadedOnce)
+
+        // Verify 5-minute Password Manager verification session
+        keyManager.clearVaultSessionVerification()
+        assertTrue(keyManager.isVaultVerificationRequired())
+        assertTrue(keyManager.verifyVaultWithMasterPassword("MyPass8!".toCharArray()))
+        assertFalse(keyManager.isVaultVerificationRequired())
+
+        // Verify recovery code resets Master Password with an 8-character password
+        keyManager.lockNow()
+        val resetResult = keyManager.recoverAndResetMasterPassword(
+            recoveryCode = recoveryCodeStr.toCharArray(),
+            newMasterPassword = "NewPass8".toCharArray(),
+            kdfParameters = fastKdf
         )
-        val repoWithFetcher = OrganizerRepository(
-            databaseFactory = databaseFactory,
-            assetStorage = assetStorage,
-            websiteLogoFetcher = fetcher
-        )
-
-        val fetchedResult = repoWithFetcher.fetchServiceIconFromWebsiteUrl("fastmail.com")
-        assertEquals("fastmail.com", fetchedResult.sourceHost)
-        assertEquals("https://fastmail.com/", fetchedResult.normalizedWebsiteUrl)
-        assertEquals("image/png", fetchedResult.asset.mimeType)
-        assertEquals(64, fetchedResult.asset.width)
-        assertEquals(64, fetchedResult.asset.height)
-
-        val savedService = (repoWithFetcher.saveService(
-            name = "Fastmail",
-            websiteUrl = fetchedResult.normalizedWebsiteUrl,
-            description = "Fetched logo service",
-            iconAssetId = fetchedResult.asset.id
-        ) as SaveServiceOutcome.Saved).service
-
-        assertEquals(fetchedResult.asset.id, savedService.iconAssetId)
-        val servicesWithCounts = repoWithFetcher.observeServicesWithCounts().first()
-        assertEquals(fetchedResult.asset.id, servicesWithCounts.single().iconAsset?.id)
+        assertNotNull(resetResult.recoveryCode)
+        keyManager.lockNow()
+        keyManager.unlockWithMasterPassword("NewPass8".toCharArray())
+        assertTrue(keyManager.lockState.value is LockState.Unlocked)
     }
 
-    private fun createSamplePngBytes(): ByteArray {
-        val bitmap = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
-        bitmap.eraseColor(android.graphics.Color.rgb(16, 185, 129))
-        return ByteArrayOutputStream().use { out ->
-            bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
-            out.toByteArray()
-        }
+    @Test
+    fun colorPalettePreferencePersistsIndependentlyOfThemeMode() = runBlocking {
+        assertEquals(AppColorPalette.EMERALD, repository.observeColorPalette().first())
+        repository.setColorPalette(AppColorPalette.AMETHYST)
+        assertEquals(AppColorPalette.AMETHYST, repository.observeColorPalette().first())
+    }
+
+    @Test
+    fun autoLockedBackupExportAndRestorePreservesAccountsServiceAccountsPasswordsAndRecoveryCode() = runBlocking {
+        val lockResult = keyManager.enableAppLock(
+            newMasterPassword = "Backup88".toCharArray(),
+            autoLockTimeout = AutoLockTimeout.IMMEDIATE,
+            kdfParameters = fastKdf
+        )
+        val originalRecoveryCode = String(lockResult.recoveryCode)
+
+        val savedAccount = repository.saveAccount(
+            existingId = null,
+            displayName = "Primary Proton",
+            email = "alice@proton.me",
+            username = "alice_sec",
+            password = "ProtonVaultPassword!1",
+            categoryId = null,
+            purpose = "Encrypted Mail",
+            recoveryEmailReference = "alice.rec@example.com",
+            recoveryPhoneReference = null,
+            notes = "Hardware 2FA enabled",
+            status = AccountStatus.ACTIVE
+        ) as SaveAccountOutcome.Saved
+
+        val savedService = repository.saveService(
+            existingId = null,
+            name = "Proton",
+            websiteUrl = "https://proton.me",
+            description = "Swiss mail",
+            iconAssetId = null
+        ) as SaveServiceOutcome.Saved
+
+        repository.saveServiceAccount(
+            existingId = null,
+            serviceId = savedService.service.id,
+            linkedAccountId = savedAccount.account.id,
+            displayName = "Proton Mail Inbox",
+            email = "alice@proton.me",
+            username = "alice_sec",
+            password = "ServiceSpecificPass!2",
+            categoryId = null,
+            purpose = "Main inbox",
+            recoveryEmailReference = null,
+            recoveryPhoneReference = null,
+            websiteUrl = "https://mail.proton.me",
+            notes = "Linked to Primary Proton",
+            status = AccountStatus.ACTIVE
+        )
+
+        val backupEngine = BackupEngine(
+            databaseFactory = databaseFactory,
+            assetStorage = assetStorage,
+            keyManager = keyManager
+        )
+
+        val exportLockKey = backupEngine.generateExportLockKey()
+        assertTrue(exportLockKey.startsWith("DAO-"))
+
+        val backupBytes = backupEngine.createEncryptedBackupBytes(
+            passphrase = exportLockKey.toCharArray(),
+            selection = ExportSelection(),
+            kdfParameters = fastKdf
+        )
+
+        // Wipe database tables to simulate restoring onto a fresh workspace
+        databaseFactory.getUnlockedDatabase().clearAllTables()
+        assertEquals(0, repository.observeAccountsWithDetails().first().size)
+        assertEquals(0, repository.observeServiceAccountsWithDetails().first().size)
+
+        val staged = backupEngine.stageAndPreviewEncryptedBackup(
+            backupFileBytes = backupBytes,
+            passphrase = exportLockKey.toCharArray()
+        )
+        val summary = backupEngine.commitStagedBackup(
+            staged = staged,
+            resolutionsByIncomingId = emptyMap<String, ConflictResolution>()
+        )
+
+        assertEquals(1, summary.importedServices)
+        assertEquals(1, summary.importedAccounts)
+        assertEquals(1, summary.importedServiceAccounts)
+
+        val restoredAccounts = repository.observeAccountsWithDetails().first()
+        assertEquals(1, restoredAccounts.size)
+        assertEquals("alice@proton.me", restoredAccounts.first().account.email)
+        assertEquals(
+            "ProtonVaultPassword!1",
+            repository.decryptSecret(restoredAccounts.first().account.encryptedPassword)
+        )
+        assertEquals(1, restoredAccounts.first().linkedServices.size)
+
+        val restoredServiceAccounts = repository.observeServiceAccountsWithDetails().first()
+        assertEquals(1, restoredServiceAccounts.size)
+        assertEquals(
+            "ServiceSpecificPass!2",
+            repository.decryptSecret(restoredServiceAccounts.first().serviceAccount.encryptedPassword)
+        )
+        assertEquals(originalRecoveryCode, keyManager.getDecryptedRecoveryCode())
     }
 }

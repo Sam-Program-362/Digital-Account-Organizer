@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Digital Account Organizer</string>
-    <string name="offline_organizer_notice">Local-only digital account organizer. This app stays offline, does not connect to external services, and never stores service passwords.</string>
+    <string name="offline_organizer_notice">Local-first encrypted account &amp; password organizer. Passwords and notes are protected with AES-256-GCM + SQLCipher encryption at rest.</string>
     <string name="nav_home">Home</string>
     <string name="nav_accounts">Accounts</string>
     <string name="nav_services">Services</string>
@@ -13,8 +13,8 @@
     <string name="action_create_category">New Category</string>
     <string name="action_lock_now">Lock Organizer</string>
     <string name="unlock_title">Organizer Locked</string>
-    <string name="unlock_subtitle">Enter your app-specific master password to unlock the encrypted local database.</string>
-    <string name="no_password_storage_notice">Never enter a service password here. This organizer records account metadata only and never stores external credentials.</string>
+    <string name="unlock_subtitle">Enter your master password (or use Fingerprint if enabled in Settings) to unlock the encrypted organizer.</string>
+    <string name="password_encryption_notice">Passwords and notes are encrypted at rest with AES-256-GCM inside your SQLCipher vault. Verification is required to reveal or copy them.</string>
     <string name="csv_warning_title">Plaintext CSV Export Warning</string>
-    <string name="csv_warning_body">CSV exports are unencrypted plaintext files intended for spreadsheet review. They may expose email addresses, usernames, recovery contact references, and notes, and do not preserve custom service logos or full relational structure.</string>
+    <string name="csv_warning_body">CSV exports are unencrypted plaintext files intended for spreadsheet review. Passwords are excluded from CSV exports for your safety; use Encrypted .dao-backup to export passwords, notes, and custom service logos securely.</string>
 </resources>
