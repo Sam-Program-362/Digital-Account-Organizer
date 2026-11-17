@@ -1,0 +1,6 @@
+{
+  "name": "Digital Account Organizer",
+  "description": "Local-first, encrypted Android organizer for tracking digital accounts across user-created services and categories without storing passwords.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
