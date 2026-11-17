@@ -357,6 +357,8 @@ fun OrganizerRootContent(
                                         openCreateDialogRequest = openCreateServiceDialogRequest,
                                         onConsumeCreateDialogRequest = { openCreateServiceDialogRequest = false },
                                         onImportLogoUri = viewModel::importServiceLogo,
+                                        onFetchLogoFromUrl = viewModel::fetchServiceLogoFromUrl,
+                                        onCancelLogoFetch = viewModel::cancelServiceLogoFetch,
                                         onSaveService = viewModel::saveService,
                                         onDismissDuplicatePrompt = viewModel::dismissDuplicateServicePrompt,
                                         onToggleArchiveService = viewModel::setServiceArchived,

@@ -1,6 +1,7 @@
 package com.example
 
 import android.security.keystore.KeyPermanentlyInvalidatedException
+import com.example.core.files.WebsiteLogoFetcher
 import com.example.core.security.AesGcmEnvelopeCipher
 import com.example.core.security.AutoLockTimeout
 import com.example.core.security.DatabaseKeyManager
@@ -12,6 +13,7 @@ import com.example.core.security.KeystoreKeyWrapper
 import com.example.core.security.LockState
 import com.example.core.security.SensitiveBytes
 import java.io.File
+import java.net.InetAddress
 import java.nio.file.Files
 import java.security.GeneralSecurityException
 import java.security.SecureRandom
@@ -56,7 +58,7 @@ class ExampleUnitTest {
     }
 
     @Test
-    fun backupRulesAndManifest_enforceZeroPermissionsAndExcludeAllPrivateDomains() {
+    fun backupRulesAndManifest_enforceCleartextBlockAndExcludeAllPrivateDomains() {
         val backupRulesFile = sequenceOf(
             File("src/main/res/xml/backup_rules.xml"),
             File("app/src/main/res/xml/backup_rules.xml")
@@ -86,8 +88,71 @@ class ExampleUnitTest {
         ).first { it.exists() }
         val manifestContent = manifestFile.readText()
         assertTrue(manifestContent.contains("android.permission.INTERNET"))
-        assertTrue(manifestContent.contains("tools:node=\"remove\""))
+        assertTrue(manifestContent.contains("android.permission.ACCESS_NETWORK_STATE"))
+        assertTrue(manifestContent.contains("android:usesCleartextTraffic=\"false\""))
         assertTrue(manifestContent.contains("android:allowBackup=\"false\""))
+    }
+
+    @Test
+    fun websiteLogoFetcher_enforcesHttpsOnly_ssrfGuards_andHtmlIconRanking() {
+        // 1. Bare domain normalizes to https://
+        val normalized = WebsiteLogoFetcher.normalizeAndValidateHttpsUri("fastmail.com/login")
+        assertEquals("https://fastmail.com/login", normalized.toString())
+
+        // 2. Insecure http://, localhost, and embedded credentials must be rejected
+        for (invalidUrl in listOf(
+            "http://fastmail.com",
+            "https://localhost/icon.png",
+            "https://intranet.local/logo.png",
+            "https://user:pass@example.com/",
+            "https://example.com:8443/icon.png"
+        )) {
+            try {
+                WebsiteLogoFetcher.normalizeAndValidateHttpsUri(invalidUrl)
+                fail("Expected IllegalArgumentException for unsafe URL: $invalidUrl")
+            } catch (_: IllegalArgumentException) {
+                // Expected
+            }
+        }
+
+        // 3. SSRF guard blocks loopback, RFC1918 private, link-local metadata, and CGNAT IPs
+        for (privateIp in listOf(
+            "127.0.0.1",
+            "10.0.0.1",
+            "172.16.10.5",
+            "192.168.1.1",
+            "169.254.169.254",
+            "100.64.1.1",
+            "::1"
+        )) {
+            val addr = InetAddress.getByName(privateIp)
+            assertFalse("Expected $privateIp to be blocked as non-public", WebsiteLogoFetcher.isPublicIpAddress(addr))
+        }
+        val publicAddr = InetAddress.getByAddress("example.com", byteArrayOf(93, 184.toByte(), 216.toByte(), 34))
+        assertTrue(WebsiteLogoFetcher.isPublicIpAddress(publicAddr))
+
+        // 4. HTML <link> discovery prioritizes apple-touch-icon PNGs and skips SVGs / HTTP links
+        val sampleHtml = """
+            <html>
+              <head>
+                <link rel="mask-icon" href="/safari-pinned-tab.svg" color="#10b981">
+                <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+                <link rel="shortcut icon" href="/favicon-32x32.png" sizes="32x32" type="image/png">
+                <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+                <link rel="icon" href="http://insecure.example.com/icon.png">
+              </head>
+              <body></body>
+            </html>
+        """.trimIndent()
+
+        val candidates = WebsiteLogoFetcher.discoverIconCandidates("https://example.com/app", sampleHtml)
+        assertEquals(
+            listOf(
+                "https://example.com/apple-touch-icon.png",
+                "https://example.com/favicon-32x32.png"
+            ),
+            candidates
+        )
     }
 
     @Test

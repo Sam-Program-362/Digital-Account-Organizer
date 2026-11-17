@@ -257,6 +257,76 @@ class ExampleRobolectricTest {
         assertTrue(csv.contains("Locally Modified Label"))
     }
 
+    @Test
+    fun websiteLogoFetch_discoversHtmlIcon_sanitizesToPng_andPersistsInRepository() = runBlocking {
+        val samplePng = createSamplePngBytes()
+        val publicIp = java.net.InetAddress.getByAddress(
+            "fastmail.com",
+            byteArrayOf(103, 168.toByte(), 172.toByte(), 37)
+        )
+        val fakeTransport = com.example.core.files.WebsiteHttpTransport { url, _, _, _ ->
+            when (url) {
+                "https://fastmail.com/" -> com.example.core.files.WebsiteHttpResponse(
+                    finalUrl = "https://fastmail.com/",
+                    statusCode = 200,
+                    contentType = "text/html; charset=utf-8",
+                    bodyBytes = """
+                        <!doctype html>
+                        <html>
+                          <head>
+                            <link rel="icon" type="image/svg+xml" href="/icon.svg">
+                            <link rel="apple-touch-icon" sizes="180x180" href="/assets/apple-touch-icon.png">
+                          </head>
+                        </html>
+                    """.trimIndent().toByteArray(Charsets.UTF_8)
+                )
+                "https://fastmail.com/assets/apple-touch-icon.png" -> com.example.core.files.WebsiteHttpResponse(
+                    finalUrl = url,
+                    statusCode = 200,
+                    contentType = "image/png",
+                    bodyBytes = samplePng
+                )
+                else -> com.example.core.files.WebsiteHttpResponse(
+                    finalUrl = url,
+                    statusCode = 404,
+                    contentType = "text/plain",
+                    bodyBytes = ByteArray(0)
+                )
+            }
+        }
+
+        val fetcher = com.example.core.files.WebsiteLogoFetcher(
+            context = context,
+            assetStorage = assetStorage,
+            transport = fakeTransport,
+            dnsResolver = { arrayOf(publicIp) },
+            connectivityChecker = { true }
+        )
+        val repoWithFetcher = OrganizerRepository(
+            databaseFactory = databaseFactory,
+            assetStorage = assetStorage,
+            websiteLogoFetcher = fetcher
+        )
+
+        val fetchedResult = repoWithFetcher.fetchServiceIconFromWebsiteUrl("fastmail.com")
+        assertEquals("fastmail.com", fetchedResult.sourceHost)
+        assertEquals("https://fastmail.com/", fetchedResult.normalizedWebsiteUrl)
+        assertEquals("image/png", fetchedResult.asset.mimeType)
+        assertEquals(64, fetchedResult.asset.width)
+        assertEquals(64, fetchedResult.asset.height)
+
+        val savedService = (repoWithFetcher.saveService(
+            name = "Fastmail",
+            websiteUrl = fetchedResult.normalizedWebsiteUrl,
+            description = "Fetched logo service",
+            iconAssetId = fetchedResult.asset.id
+        ) as SaveServiceOutcome.Saved).service
+
+        assertEquals(fetchedResult.asset.id, savedService.iconAssetId)
+        val servicesWithCounts = repoWithFetcher.observeServicesWithCounts().first()
+        assertEquals(fetchedResult.asset.id, servicesWithCounts.single().iconAsset?.id)
+    }
+
     private fun createSamplePngBytes(): ByteArray {
         val bitmap = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
         bitmap.eraseColor(android.graphics.Color.rgb(16, 185, 129))

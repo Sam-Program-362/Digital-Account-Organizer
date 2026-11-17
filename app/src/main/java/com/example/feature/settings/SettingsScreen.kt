@@ -313,7 +313,7 @@ fun SettingsScreen(
                         )
                     }
                     Text(
-                        text = "• Offline-First & Zero Network Access: The Android INTERNET permission is explicitly removed from the application manifest.\n" +
+                        text = "• Local-First & Scoped Network Access: All organizer records stay on-device. HTTPS-only network access (cleartext disabled) is used exclusively when you explicitly tap 'Fetch Logo from URL'—never for background telemetry, analytics, or cloud sync.\n" +
                             "• No Service Passwords Stored: This utility organizes account metadata only and never asks for external account passwords, tokens, or TOTP seeds.\n" +
                             "• Auto Backup Excluded: Database, custom service logos, and key envelopes are excluded from Android cloud backup and device-to-device transfer.\n" +
                             "• Recent-Apps Protection: FLAG_SECURE prevents sensitive screenshots and app-switcher previews when App Lock is enabled.",

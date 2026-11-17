@@ -22,6 +22,7 @@ This log distinguishes user-confirmed product decisions from recommended technic
 | D-014 | Background auto-lock timeout is configurable (`Immediate`, `1m`, `5m`) with `Immediate` as default. | `DatabaseKeyManager` and `ProcessLifecycleOwner` enforce the selected timeout. |
 | D-015 | Visual palette uses the Deep Slate & Emerald Trust design system for Light and Dark themes. | Implemented in `Color.kt`, `Type.kt`, and `Theme.kt`. |
 | D-016 | One optional category per account (MVP baseline `R-015` applied). | `AccountEntity.categoryId` links to `CategoryEntity.id` with `SET_NULL` on delete. |
+| D-017 | Allow `INTERNET` permission strictly for explicit, user-triggered HTTPS website logo fetching in the Create/Edit Service dialog. | `WebsiteLogoFetcher` enforces HTTPS-only (`usesCleartextTraffic="false"`), SSRF private-IP blocking, HTML `<link>` icon discovery + `/favicon.ico` fallback, and local PNG sanitization via `ServiceAssetStorage`. |
 
 ## Recommended Technical Baseline (Implemented)
 

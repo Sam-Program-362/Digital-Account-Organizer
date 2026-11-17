@@ -28,12 +28,14 @@ import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Unarchive
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -44,6 +46,7 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -55,6 +58,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.app.DuplicateServicePrompt
+import com.example.core.database.FetchedServiceLogoResult
 import com.example.core.designsystem.AccountStatusBadge
 import com.example.core.designsystem.EmptyStateCard
 import com.example.core.designsystem.ServiceLogoFrame
@@ -71,6 +75,8 @@ fun ServicesScreen(
     openCreateDialogRequest: Boolean,
     onConsumeCreateDialogRequest: () -> Unit,
     onImportLogoUri: (Uri, (ServiceAssetRecord) -> Unit, (String) -> Unit) -> Unit,
+    onFetchLogoFromUrl: (String, (FetchedServiceLogoResult) -> Unit, (String) -> Unit) -> Unit = { _, _, _ -> },
+    onCancelLogoFetch: () -> Unit = {},
     onSaveService: (
         existingId: String?,
         name: String,
@@ -256,6 +262,8 @@ fun ServicesScreen(
         ServiceFormDialog(
             initial = editingService,
             onImportLogoUri = onImportLogoUri,
+            onFetchLogoFromUrl = onFetchLogoFromUrl,
+            onCancelLogoFetch = onCancelLogoFetch,
             onDismiss = { showFormDialog = false },
             onSave = { name, website, desc, iconId, onError ->
                 onSaveService(
@@ -522,6 +530,8 @@ private fun ServiceDetailDialog(
 private fun ServiceFormDialog(
     initial: ServiceWithCount?,
     onImportLogoUri: (Uri, (ServiceAssetRecord) -> Unit, (String) -> Unit) -> Unit,
+    onFetchLogoFromUrl: (String, (FetchedServiceLogoResult) -> Unit, (String) -> Unit) -> Unit,
+    onCancelLogoFetch: () -> Unit,
     onDismiss: () -> Unit,
     onSave: (
         name: String,
@@ -535,16 +545,27 @@ private fun ServiceFormDialog(
     var websiteUrl by rememberSaveable { mutableStateOf(initial?.service?.websiteUrl.orEmpty()) }
     var description by rememberSaveable { mutableStateOf(initial?.service?.description.orEmpty()) }
     var currentAsset by remember { mutableStateOf(initial?.iconAsset) }
+    var isFetchingLogo by remember { mutableStateOf(false) }
+    var fetchedHostStatus by remember { mutableStateOf<String?>(null) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            onCancelLogoFetch()
+        }
+    }
 
     val photoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri: Uri? ->
         if (uri != null) {
+            onCancelLogoFetch()
+            isFetchingLogo = false
             onImportLogoUri(
                 uri,
                 { imported ->
                     currentAsset = imported
+                    fetchedHostStatus = null
                     errorMessage = null
                 },
                 { err -> errorMessage = err }
@@ -553,7 +574,10 @@ private fun ServiceFormDialog(
     }
 
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = {
+            onCancelLogoFetch()
+            onDismiss()
+        },
         title = {
             Text(if (initial == null) "Create Custom Service" else "Edit Service")
         },
@@ -562,7 +586,7 @@ private fun ServiceFormDialog(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                // Custom logo picker row
+                // Custom logo preview & actions
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
@@ -573,21 +597,34 @@ private fun ServiceFormDialog(
                         asset = currentAsset,
                         size = 56.dp
                     )
-                    Column(modifier = Modifier.weight(1f)) {
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
                         OutlinedButton(
                             onClick = {
                                 photoPickerLauncher.launch(
                                     PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
                                 )
                             },
-                            modifier = Modifier.testTag("pick_service_logo_button")
+                            enabled = !isFetchingLogo,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("pick_service_logo_button")
                         ) {
                             Icon(Icons.Default.Image, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(Modifier.width(6.dp))
-                            Text(if (currentAsset == null) "Choose Logo" else "Change Logo")
+                            Text(if (currentAsset == null) "Choose Logo from Device" else "Change Logo from Device")
                         }
                         if (currentAsset != null) {
-                            TextButton(onClick = { currentAsset = null }) {
+                            TextButton(
+                                onClick = {
+                                    currentAsset = null
+                                    fetchedHostStatus = null
+                                },
+                                enabled = !isFetchingLogo,
+                                modifier = Modifier.testTag("remove_service_logo_button")
+                            ) {
                                 Text("Remove Custom Logo")
                             }
                         }
@@ -612,6 +649,7 @@ private fun ServiceFormDialog(
                     value = websiteUrl,
                     onValueChange = {
                         websiteUrl = it
+                        fetchedHostStatus = null
                         errorMessage = null
                     },
                     label = { Text("Website URL (Optional)") },
@@ -621,6 +659,72 @@ private fun ServiceFormDialog(
                         .fillMaxWidth()
                         .testTag("service_website_input")
                 )
+
+                // Explicit user-triggered HTTPS Website Logo Fetch button & status
+                OutlinedButton(
+                    onClick = {
+                        val targetUrl = websiteUrl.trim()
+                        if (targetUrl.isEmpty()) {
+                            errorMessage = "Enter a website URL first to fetch its logo."
+                            return@OutlinedButton
+                        }
+                        isFetchingLogo = true
+                        fetchedHostStatus = null
+                        errorMessage = null
+                        onFetchLogoFromUrl(
+                            targetUrl,
+                            { result ->
+                                isFetchingLogo = false
+                                currentAsset = result.asset
+                                websiteUrl = result.normalizedWebsiteUrl
+                                fetchedHostStatus = "Logo fetched & saved locally from ${result.sourceHost}"
+                                errorMessage = null
+                            },
+                            { err ->
+                                isFetchingLogo = false
+                                errorMessage = err
+                            }
+                        )
+                    },
+                    enabled = websiteUrl.isNotBlank() && !isFetchingLogo,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("fetch_service_logo_button")
+                ) {
+                    if (isFetchingLogo) {
+                        CircularProgressIndicator(
+                            modifier = Modifier
+                                .size(16.dp)
+                                .testTag("fetch_service_logo_loading_indicator"),
+                            strokeWidth = 2.dp
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text("Fetching Website Logo...")
+                    } else {
+                        Icon(
+                            imageVector = Icons.Default.Language,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text("Fetch Logo from Website URL")
+                    }
+                }
+
+                if (fetchedHostStatus != null) {
+                    Text(
+                        text = fetchedHostStatus!!,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.testTag("service_logo_fetch_status_text")
+                    )
+                } else {
+                    Text(
+                        text = "When online, tap 'Fetch Logo from Website URL' to download the site's official icon over HTTPS and save it locally.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
 
                 OutlinedTextField(
                     value = description,
@@ -646,6 +750,7 @@ private fun ServiceFormDialog(
         confirmButton = {
             Button(
                 onClick = {
+                    onCancelLogoFetch()
                     onSave(
                         name,
                         websiteUrl.takeIf { it.isNotBlank() },
@@ -653,13 +758,19 @@ private fun ServiceFormDialog(
                         currentAsset?.id
                     ) { err -> errorMessage = err }
                 },
+                enabled = !isFetchingLogo,
                 modifier = Modifier.testTag("save_service_button")
             ) {
                 Text("Save Service")
             }
         },
         dismissButton = {
-            OutlinedButton(onClick = onDismiss) {
+            OutlinedButton(
+                onClick = {
+                    onCancelLogoFetch()
+                    onDismiss()
+                }
+            ) {
                 Text("Cancel")
             }
         }

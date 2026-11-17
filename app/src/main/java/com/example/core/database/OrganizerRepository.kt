@@ -3,6 +3,7 @@ package com.example.core.database
 import android.net.Uri
 import androidx.room.withTransaction
 import com.example.core.files.ServiceAssetStorage
+import com.example.core.files.WebsiteLogoFetcher
 import com.example.domain.model.AccountRecord
 import com.example.domain.model.AccountStatus
 import com.example.domain.model.AccountWithDetails
@@ -19,6 +20,12 @@ import java.util.UUID
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
+
+data class FetchedServiceLogoResult(
+    val asset: ServiceAssetRecord,
+    val sourceHost: String,
+    val normalizedWebsiteUrl: String
+)
 
 sealed interface SaveServiceOutcome {
     data class Saved(val service: ServiceRecord) : SaveServiceOutcome
@@ -40,6 +47,10 @@ sealed interface SaveAccountOutcome {
 class OrganizerRepository(
     private val databaseFactory: EncryptedDatabaseFactory,
     private val assetStorage: ServiceAssetStorage,
+    private val websiteLogoFetcher: WebsiteLogoFetcher = WebsiteLogoFetcher(
+        context = null,
+        assetStorage = assetStorage
+    ),
     private val clockMillis: () -> Long = { System.currentTimeMillis() }
 ) {
     private val db: OrganizerDatabase
@@ -155,6 +166,16 @@ class OrganizerRepository(
         val entity = assetStorage.importFromRawBytes(bytes)
         db.serviceAssetDao().upsertAsset(entity)
         return entity.toDomain()
+    }
+
+    suspend fun fetchServiceIconFromWebsiteUrl(rawWebsiteUrl: String): FetchedServiceLogoResult {
+        val fetched = websiteLogoFetcher.fetchAndStoreLogo(rawWebsiteUrl)
+        db.serviceAssetDao().upsertAsset(fetched.assetEntity)
+        return FetchedServiceLogoResult(
+            asset = fetched.assetEntity.toDomain(),
+            sourceHost = fetched.sourceHost,
+            normalizedWebsiteUrl = fetched.normalizedWebsiteUrl
+        )
     }
 
     suspend fun saveService(

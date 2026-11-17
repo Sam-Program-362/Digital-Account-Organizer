@@ -3,12 +3,11 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <!--
-      Invariant 1: Never allow INTERNET permission.
-      Explicitly remove any transitive INTERNET permission if a library ever declares one.
+      Network access is used strictly for explicit, user-triggered HTTPS website logo fetching
+      when creating or editing a service. Cleartext HTTP traffic is disabled platform-wide.
     -->
-    <uses-permission
-        android:name="android.permission.INTERNET"
-        tools:node="remove" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <application
         android:name=".app.DigitalAccountOrganizerApp"
@@ -20,6 +19,7 @@
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
+        android:usesCleartextTraffic="false"
         android:theme="@style/Theme.MyApplication">
         <activity
             android:name=".MainActivity"

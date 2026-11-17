@@ -372,6 +372,8 @@ class OrganizerViewModel(
     }
 
     // --- Service & Custom Artwork Operations ---
+    private var activeLogoFetchJob: kotlinx.coroutines.Job? = null
+
     fun importServiceLogo(
         uri: Uri,
         onImported: (ServiceAssetRecord) -> Unit,
@@ -386,6 +388,30 @@ class OrganizerViewModel(
                 onError(e.message ?: "Selected file is not a valid image.")
             }
         }
+    }
+
+    fun fetchServiceLogoFromUrl(
+        rawWebsiteUrl: String,
+        onFetched: (com.example.core.database.FetchedServiceLogoResult) -> Unit,
+        onError: (String) -> Unit
+    ) {
+        activeLogoFetchJob?.cancel()
+        activeLogoFetchJob = viewModelScope.launch {
+            runCatching {
+                repository.fetchServiceIconFromWebsiteUrl(rawWebsiteUrl)
+            }.onSuccess { result ->
+                onFetched(result)
+            }.onFailure { e ->
+                if (e !is kotlinx.coroutines.CancellationException) {
+                    onError(e.message ?: "Unable to fetch logo from website URL.")
+                }
+            }
+        }
+    }
+
+    fun cancelServiceLogoFetch() {
+        activeLogoFetchJob?.cancel()
+        activeLogoFetchJob = null
     }
 
     fun saveService(

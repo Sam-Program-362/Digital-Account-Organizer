@@ -97,7 +97,7 @@ jobs:
           KEY_PASSWORD: ${{ env.EFFECTIVE_KEY_PASSWORD }}
         run: gradle :app:assembleRelease --no-daemon --no-configuration-cache
 
-      - name: Verify APK Signature & Zero Internet Permission
+      - name: Verify APK Signature & Scoped Permissions
         run: |
           APK_PATH="app/build/outputs/apk/release/app-release.apk"
           if [ ! -f "$APK_PATH" ]; then
@@ -108,11 +108,15 @@ jobs:
           "$APKSIGNER" verify --verbose --print-certs "$APK_PATH"
 
           AAPT2="$(find $ANDROID_HOME/build-tools -name aapt2 | sort -V | tail -n 1)"
-          if "$AAPT2" dump permissions "$APK_PATH" | grep -q "android.permission.INTERNET"; then
-            echo "::error::Release APK unexpectedly contains android.permission.INTERNET!"
-            exit 1
-          fi
-          echo "Verified: Signed Release APK contains zero INTERNET permissions."
+          PERMS="$("$AAPT2" dump permissions "$APK_PATH")"
+          echo "$PERMS"
+          for FORBIDDEN in "READ_EXTERNAL_STORAGE" "WRITE_EXTERNAL_STORAGE" "READ_MEDIA_IMAGES" "ACCESS_FINE_LOCATION" "READ_CONTACTS"; do
+            if echo "$PERMS" | grep -q "$FORBIDDEN"; then
+              echo "::error::Release APK unexpectedly contains forbidden permission $FORBIDDEN!"
+              exit 1
+            fi
+          done
+          echo "Verified: Signed Release APK signature and scoped permission policy passed."
 
       - name: Clean Up Decoded Keystore
         if: always()
