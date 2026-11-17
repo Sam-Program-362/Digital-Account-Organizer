@@ -1,0 +1,245 @@
+name: Release Android APK
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. 2.37.1-release). Used for the APK filename, GitHub Release tag, and release title.'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build, Sign & Publish Release APK
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v5
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: "platform-tools"
+
+      - name: Install Android SDK Platform 36 & Build Tools
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.3.1"
+
+      - name: Determine release version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            # Strip a leading 'v' from the pushed tag ref (e.g. v2.37.1-release -> 2.37.1-release)
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+
+          if [ -z "$VERSION" ]; then
+            echo "::error::No release version could be determined."
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "apk_name=DigitalAccountOrganizer-${VERSION}.apk" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - name: Decode & Prepare Release Signing Keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        shell: bash
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ] || [ -z "$STORE_PASSWORD" ]; then
+            echo "::error::Missing required signing secrets (KEYSTORE_BASE64, STORE_PASSWORD). Add them in GitHub Repository Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+
+          # Decode the base64-encoded keystore to the path expected by app/build.gradle.kts.
+          echo "$KEYSTORE_BASE64" | tr -d ' \n\r\t' | base64 -d > "${GITHUB_WORKSPACE}/my-upload-key.jks"
+
+          # Validate the keystore opens with the store password (no secret values are printed).
+          if ! keytool -list -keystore "${GITHUB_WORKSPACE}/my-upload-key.jks" -storepass "$STORE_PASSWORD" >/dev/null 2>&1; then
+            echo "::error::Keystore could not be opened with STORE_PASSWORD."
+            exit 1
+          fi
+
+          # app/build.gradle.kts expects keyAlias = "upload".
+          # If the keystore has a different alias, rename it to "upload".
+          if [ -n "$KEY_ALIAS" ] && [ "$KEY_ALIAS" != "upload" ]; then
+            if ! keytool -list -keystore "${GITHUB_WORKSPACE}/my-upload-key.jks" -storepass "$STORE_PASSWORD" -alias "upload" >/dev/null 2>&1; then
+              keytool -changealias \
+                -keystore "${GITHUB_WORKSPACE}/my-upload-key.jks" \
+                -storepass "$STORE_PASSWORD" \
+                -alias "$KEY_ALIAS" \
+                -destalias "upload" \
+                -keypass "${KEY_PASSWORD:-$STORE_PASSWORD}"
+            fi
+          fi
+
+      - name: Diagnose Build Environment
+        shell: bash
+        run: |
+          echo "Java version: $(java -version 2>&1)"
+          echo "Gradle version: $(gradle --version 2>&1 | head -5)"
+          echo "ANDROID_HOME: $ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT: $ANDROID_SDK_ROOT"
+          ls -la "$ANDROID_HOME/build-tools/" 2>/dev/null || echo "No build-tools dir"
+
+      - name: Build Signed Release APK
+        env:
+          KEYSTORE_PATH: "${{ github.workspace }}/my-upload-key.jks"
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        shell: bash
+        run: |
+          gradle :app:assembleRelease --no-daemon --no-configuration-cache --stacktrace --info
+
+      - name: Verify Signed APK Exists
+        shell: bash
+        run: |
+          APK_PATH="app/build/outputs/apk/release/app-release.apk"
+          if [ ! -f "$APK_PATH" ]; then
+            echo "::error::Release APK was not found at $APK_PATH"
+            exit 1
+          fi
+          echo "Release APK found at $APK_PATH"
+
+      - name: Verify APK Signature & Produce Checksum
+        id: verify
+        shell: bash
+        run: |
+          APK_PATH="app/build/outputs/apk/release/app-release.apk"
+
+          APKSIGNER="$(find $ANDROID_HOME/build-tools -name apksigner | sort -V | tail -n 1)"
+          if [ -z "$APKSIGNER" ]; then
+            echo "::error::apksigner not found in Android build tools."
+            exit 1
+          fi
+
+          # Fail the workflow if the APK signature does not verify.
+          "$APKSIGNER" verify --verbose --print-certs "$APK_PATH"
+
+          SHA256="$(sha256sum "$APK_PATH" | cut -d' ' -f1)"
+          SIZE="$(stat -c%s "$APK_PATH")"
+
+          echo "apk_path=$APK_PATH" >> "$GITHUB_OUTPUT"
+          echo "apk_sha256=$SHA256" >> "$GITHUB_OUTPUT"
+          echo "apk_size=$SIZE" >> "$GITHUB_OUTPUT"
+          echo "apk_name=${{ steps.version.outputs.apk_name }}" >> "$GITHUB_OUTPUT"
+
+          echo "::notice title=APK Verified::${{ steps.version.outputs.apk_name }}, $SIZE bytes, SHA-256 $SHA256"
+
+      - name: Prepare Named APK
+        shell: bash
+        run: |
+          cp "${{ steps.verify.outputs.apk_path }}" "${{ steps.version.outputs.apk_name }}"
+
+      - name: Upload APK Artifact (optional, for runner download)
+        uses: actions/upload-artifact@v5
+        with:
+          name: DigitalAccountOrganizer-release-apk
+          path: ${{ steps.version.outputs.apk_name }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Refuse to Overwrite Existing Release (workflow_dispatch only)
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          RELEASE_TAG="${{ steps.version.outputs.release_tag }}"
+
+          if gh release view "$RELEASE_TAG" --repo "${{ github.repository }}" > /dev/null 2>&1; then
+            echo "::error::Release already exists for $RELEASE_TAG; refusing to overwrite."
+            exit 1
+          fi
+
+          echo "No existing release for $RELEASE_TAG."
+
+      - name: Write Release Notes
+        shell: bash
+        run: |
+          cat > release-notes.md <<EOF
+          # Digital Account Organizer ${{ steps.version.outputs.version }}
+
+          ## Release ${{ steps.version.outputs.version }}
+
+          Automated release built, signed, and published by GitHub Actions.
+          No manual APK upload required.
+
+          ### Build Details
+
+          - **Version:** ${{ steps.version.outputs.version }}
+          - **APK:** \`${{ steps.version.outputs.apk_name }}\`
+          - **APK SHA-256:** \`${{ steps.verify.outputs.apk_sha256 }}\`
+          - **APK Size:** ${{ steps.verify.outputs.apk_size }} bytes
+          - **Source Commit:** ${{ github.sha }}
+          - **Built on:** $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          ### Installation
+
+          Download the \`.apk\` asset from this release and install it on your Android device.
+          You may need to enable installation from unknown sources (sideloading).
+
+          ### Signing
+
+          This APK is signed with the application's permanent release-signing certificate.
+          Installing over a previous version requires the same signing certificate;
+          otherwise the existing app must be uninstalled first.
+
+          ---
+
+          _Generated by \`.github/workflows/release-apk.yml_\_
+          EOF
+
+      - name: Create GitHub Release with APK
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          RELEASE_TAG="${{ steps.version.outputs.release_tag }}"
+
+          # On a tag push the tag already exists (it triggered this workflow).
+          # On workflow_dispatch, gh release create creates the tag at the current commit.
+          gh release create "$RELEASE_TAG" "${{ steps.version.outputs.apk_name }}" \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --title "Digital Account Organizer ${{ steps.version.outputs.version }}" \
+            --notes-file release-notes.md
+
+          gh release view "$RELEASE_TAG" --repo "${{ github.repository }}" \
+            --json tagName,name,url,isDraft,isPrerelease,targetCommitish,assets
+
+          echo "::notice title=Release Published::https://github.com/${{ github.repository }}/releases/tag/$RELEASE_TAG"
+
+      - name: Clean Up Decoded Keystore
+        if: always()
+        shell: bash
+        run: rm -f "${{ github.workspace }}/my-upload-key.jks"

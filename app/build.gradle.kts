@@ -10,14 +10,14 @@ plugins {
 
 android {
   namespace = "com.example"
-  compileSdk { version = release(36) { minorApiLevel = 1 } }
+  compileSdk = 36
 
   defaultConfig {
     applicationId = "com.aistudio.accountorganizer.vxqpmz"
     minSdk = 26
     targetSdk = 36
-    versionCode = 1
-    versionName = "1.0"
+    versionCode = 203701
+    versionName = "2.37.1-release"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
