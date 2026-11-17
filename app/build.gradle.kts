@@ -16,8 +16,8 @@ android {
     applicationId = "com.aistudio.accountorganizer.vxqpmz"
     minSdk = 26
     targetSdk = 36
-    versionCode = 1
-    versionName = "1.0"
+    versionCode = 203701
+    versionName = "2.37.1-release"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
