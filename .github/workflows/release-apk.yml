@@ -165,7 +165,8 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Refuse to Overwrite Existing Release or Tag
+      - name: Refuse to Overwrite Existing Release (workflow_dispatch only)
+        if: github.event_name == 'workflow_dispatch'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -178,12 +179,7 @@ jobs:
             exit 1
           fi
 
-          if gh api "repos/${{ github.repository }}/git/ref/tags/$RELEASE_TAG" > /dev/null 2>&1; then
-            echo "::error::Tag $RELEASE_TAG already exists; refusing to reuse."
-            exit 1
-          fi
-
-          echo "No existing release or tag for $RELEASE_TAG."
+          echo "No existing release for $RELEASE_TAG."
 
       - name: Write Release Notes
         shell: bash
