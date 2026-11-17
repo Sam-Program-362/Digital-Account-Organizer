@@ -68,6 +68,8 @@ jobs:
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
         shell: bash
         run: |
           if [ -z "$KEYSTORE_BASE64" ] || [ -z "$STORE_PASSWORD" ]; then
@@ -82,6 +84,19 @@ jobs:
           if ! keytool -list -keystore "${GITHUB_WORKSPACE}/my-upload-key.jks" -storepass "$STORE_PASSWORD" >/dev/null 2>&1; then
             echo "::error::Keystore could not be opened with STORE_PASSWORD."
             exit 1
+          fi
+
+          # app/build.gradle.kts expects keyAlias = "upload".
+          # If the keystore has a different alias, rename it to "upload".
+          if [ -n "$KEY_ALIAS" ] && [ "$KEY_ALIAS" != "upload" ]; then
+            if ! keytool -list -keystore "${GITHUB_WORKSPACE}/my-upload-key.jks" -storepass "$STORE_PASSWORD" -alias "upload" >/dev/null 2>&1; then
+              keytool -changealias \
+                -keystore "${GITHUB_WORKSPACE}/my-upload-key.jks" \
+                -storepass "$STORE_PASSWORD" \
+                -alias "$KEY_ALIAS" \
+                -destalias "upload" \
+                -keypass "${KEY_PASSWORD:-$STORE_PASSWORD}"
+            fi
           fi
 
       - name: Diagnose Build Environment
