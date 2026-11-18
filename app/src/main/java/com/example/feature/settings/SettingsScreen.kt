@@ -49,6 +49,8 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -75,9 +77,11 @@ fun SettingsScreen(
     unlockedState: LockState.Unlocked,
     themePreference: ThemePreference,
     colorPalette: AppColorPalette,
+    restrictScreenshotsEntireApp: Boolean,
     isBiometricHardwareAvailable: Boolean,
     onSelectThemePreference: (ThemePreference) -> Unit,
     onSelectColorPalette: (AppColorPalette) -> Unit,
+    onSetRestrictScreenshotsEntireApp: (Boolean) -> Unit,
     onSetPasswordManagerLockEnabled: (Boolean) -> Unit,
     onSetUseMasterPasswordForVault: (Boolean) -> Unit,
     onEnableAppLock: (masterPassword: String, timeout: AutoLockTimeout, onError: (String) -> Unit) -> Unit,
@@ -88,13 +92,30 @@ fun SettingsScreen(
     onRequestVerifiedAction: (onVerified: () -> Unit) -> Unit,
     onGetDecryptedRecoveryCode: () -> String?,
     onDownloadRecoveryCodeOnce: () -> Unit,
-    onLockNow: () -> Unit
+    onLockNow: () -> Unit,
+    onCredentialModalActiveChange: (Boolean) -> Unit = {}
 ) {
     val context = LocalContext.current
     var showEnableLockDialog by remember { mutableStateOf(false) }
     var showChangePasswordDialog by remember { mutableStateOf(false) }
     var showDisableLockDialog by remember { mutableStateOf(false) }
     var revealedRecoveryCode by remember { mutableStateOf<String?>(null) }
+
+    val isCredentialModalOpen =
+        revealedRecoveryCode != null ||
+            showEnableLockDialog ||
+            showChangePasswordDialog ||
+            showDisableLockDialog
+
+    LaunchedEffect(isCredentialModalOpen) {
+        onCredentialModalActiveChange(isCredentialModalOpen)
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            onCredentialModalActiveChange(false)
+        }
+    }
 
     LazyColumn(
         modifier = Modifier
@@ -111,7 +132,7 @@ fun SettingsScreen(
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    text = "Configure appearance mode, interface color themes, Password Manager verification, and Master Password lock.",
+                    text = "Configure appearance mode, interface color themes, screenshot protection, Password Manager verification, and Master Password lock.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -295,6 +316,54 @@ fun SettingsScreen(
                                 modifier = Modifier.testTag("vault_method_master_password")
                             )
                         }
+                    }
+                }
+            }
+        }
+
+        // 2b. Screen Capture & Recording Protection (FLAG_SECURE)
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Shield,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Restrict Screenshots Across Entire App",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = if (restrictScreenshotsEntireApp) {
+                                    "Enabled — Screenshots and screen recording are blocked on every page in the application."
+                                } else {
+                                    "Default (Off) — Normal pages allow screenshots & recording. Password Manager and Credential pages are automatically protected."
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = restrictScreenshotsEntireApp,
+                            onCheckedChange = onSetRestrictScreenshotsEntireApp,
+                            modifier = Modifier.testTag("restrict_screenshots_entire_app_switch")
+                        )
                     }
                 }
             }

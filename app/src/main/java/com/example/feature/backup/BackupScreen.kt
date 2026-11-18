@@ -1,12 +1,15 @@
 package com.example.feature.backup
 
+import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -16,22 +19,27 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
@@ -51,6 +59,8 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -67,10 +77,13 @@ import androidx.compose.ui.unit.dp
 import com.example.core.designsystem.FormSectionCard
 import com.example.core.designsystem.OfflinePrivacyBanner
 import com.example.core.files.SavedVaultBackupEntry
+import com.example.core.files.StorageDirectoryListing
+import com.example.core.files.StorageFolderShortcut
 import com.example.domain.model.AccountWithDetails
 import com.example.domain.model.CategoryWithCount
 import com.example.domain.model.ServiceWithCount
 import com.example.ui.theme.JetBrainsMonoFontFamily
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -82,9 +95,16 @@ fun BackupScreen(
     services: List<ServiceWithCount>,
     categories: List<CategoryWithCount>,
     savedVaultBackups: List<SavedVaultBackupEntry>,
+    storageShortcuts: List<StorageFolderShortcut>,
+    currentDirectoryListing: StorageDirectoryListing?,
+    externalImportUri: Uri?,
     stagedBackup: StagedBackupPackage?,
     conflictResolutions: Map<String, ConflictResolution>,
     generatedExportLockKey: String?,
+    onBrowseStorageDirectory: (String?) -> Unit,
+    onRefreshBackups: () -> Unit,
+    onConsumeExternalImportUri: () -> Unit,
+    onCredentialModalActiveChange: (Boolean) -> Unit = {},
     onPrepareAutoLockedBackup: (
         mode: ExportMode,
         selectedAccountIds: Set<String>,
@@ -125,8 +145,35 @@ fun BackupScreen(
     var pendingImportVaultEntry by remember { mutableStateOf<SavedVaultBackupEntry?>(null) }
     var importLockKeyInput by remember { mutableStateOf("") }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    var systemChooserNotice by remember { mutableStateOf<String?>(null) }
 
     val dateFormatter = remember { SimpleDateFormat("MMM dd, yyyy HH:mm", Locale.US) }
+
+    // If the user opened or shared a .dao-backup file from an external File Manager / Quick Share / Chat app
+    LaunchedEffect(externalImportUri) {
+        if (externalImportUri != null) {
+            pendingImportVaultEntry = null
+            pendingImportUri = externalImportUri
+            importLockKeyInput = ""
+            errorMessage = null
+            onConsumeExternalImportUri()
+        }
+    }
+
+    val isCredentialDialogOpen =
+        (showGeneratedKeyModal && !generatedExportLockKey.isNullOrBlank()) ||
+            pendingImportUri != null ||
+            pendingImportVaultEntry != null
+
+    LaunchedEffect(isCredentialDialogOpen) {
+        onCredentialModalActiveChange(isCredentialDialogOpen)
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            onCredentialModalActiveChange(false)
+        }
+    }
 
     val createEncryptedBackupLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/octet-stream")
@@ -149,10 +196,49 @@ fun BackupScreen(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
         if (uri != null) {
+            showImportSourceModal = false
             pendingImportVaultEntry = null
             pendingImportUri = uri
             importLockKeyInput = ""
             errorMessage = null
+        }
+    }
+
+    val getContentChooserLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val uri = result.data?.data
+        if (result.resultCode == Activity.RESULT_OK && uri != null) {
+            showImportSourceModal = false
+            pendingImportVaultEntry = null
+            pendingImportUri = uri
+            importLockKeyInput = ""
+            errorMessage = null
+        }
+    }
+
+    val launchSystemFileChooserWithFallback: () -> Unit = {
+        systemChooserNotice = null
+        val openedViaSaf = runCatching {
+            openBackupDocumentLauncher.launch(arrayOf("*/*"))
+            true
+        }.getOrDefault(false)
+
+        if (!openedViaSaf) {
+            val openedViaGetContent = runCatching {
+                val getContentIntent = Intent(Intent.ACTION_GET_CONTENT).apply {
+                    type = "*/*"
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                }
+                val chooser = Intent.createChooser(getContentIntent, "Select .dao-backup file")
+                getContentChooserLauncher.launch(chooser)
+                true
+            }.getOrDefault(false)
+
+            if (!openedViaGetContent) {
+                systemChooserNotice =
+                    "No external system file manager app is installed on this device. Use the built-in Device Folder Browser below or select from Discovered Backups."
+            }
         }
     }
 
@@ -175,7 +261,7 @@ fun BackupScreen(
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    text = "Export locked backups directly to Downloads & Built-In Backup Vault, or restore with your Export Lock Key.",
+                    text = "Portable cross-device .dao-backup exports locked with an auto-generated Export Lock Key, plus an In-App Device Storage Browser.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -184,7 +270,7 @@ fun BackupScreen(
 
         item {
             OfflinePrivacyBanner(
-                noticeText = "When you export a .dao-backup file, the application automatically generates a unique random Export Lock Key (e.g. DAO-XXXX-XXXX-XXXX-XXXX) and encrypts the file with AES-256-GCM + Argon2id. Files are saved directly to Downloads and your Built-In Backup Vault list."
+                noticeText = "Every exported .dao-backup file is portable across devices and locked with a random Export Lock Key (DAO-XXXX-XXXX-XXXX-XXXX) using AES-256-GCM + Argon2id. You can import backups from Downloads, any device folder, or via 'Open With' in your phone's File Manager."
             )
         }
 
@@ -210,7 +296,7 @@ fun BackupScreen(
         item {
             FormSectionCard(
                 title = "Locked Encrypted Backup (.dao-backup)",
-                subtitle = "Includes standalone Accounts, Services, Service Account entries, encrypted Passwords, custom logos, and Recovery Code metadata.",
+                subtitle = "Portable across devices. Includes standalone Accounts, Services, Service Account entries, encrypted Passwords, custom logos, and Recovery Code metadata.",
                 icon = Icons.Default.Lock
             ) {
                 Text(
@@ -327,15 +413,10 @@ fun BackupScreen(
                 OutlinedButton(
                     onClick = {
                         errorMessage = null
-                        if (encryptedVaultBackups.isNotEmpty()) {
-                            showImportSourceModal = true
-                        } else {
-                            runCatching {
-                                openBackupDocumentLauncher.launch(arrayOf("*/*"))
-                            }.onFailure {
-                                showImportSourceModal = true
-                            }
-                        }
+                        systemChooserNotice = null
+                        onRefreshBackups()
+                        onBrowseStorageDirectory(currentDirectoryListing?.currentPath)
+                        showImportSourceModal = true
                     },
                     shape = RoundedCornerShape(12.dp),
                     modifier = Modifier
@@ -344,7 +425,7 @@ fun BackupScreen(
                 ) {
                     Icon(Icons.Default.CloudDownload, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(8.dp))
-                    Text("Import / Restore .dao-backup")
+                    Text("Import / Restore .dao-backup (Browse Storage)")
                 }
             }
         }
@@ -364,16 +445,37 @@ fun BackupScreen(
             }
         }
 
-        // 3. Built-In Backup Vault & Downloads List
+        // 3. Discovered Backups in Downloads & Built-In Backup Vault
         item {
             FormSectionCard(
-                title = "Built-In Backup Vault & Downloads (${savedVaultBackups.size})",
-                subtitle = "Saved .dao-backup and .csv files stored in Downloads and your in-app Backup Vault.",
+                title = "Discovered Backups in Downloads & Vault (${savedVaultBackups.size})",
+                subtitle = "Automatically discovers .dao-backup files in your device's Downloads folder, Documents folder, and in-app Backup Vault.",
                 icon = Icons.Default.SaveAlt
             ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Tap Import on any backup below or browse folders:",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f)
+                    )
+                    TextButton(
+                        onClick = { onRefreshBackups() },
+                        modifier = Modifier.testTag("refresh_discovered_backups_button")
+                    ) {
+                        Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Rescan")
+                    }
+                }
+
                 if (savedVaultBackups.isEmpty()) {
                     Text(
-                        text = "No saved backup files in your Built-In Backup Vault yet. Export a .dao-backup or CSV above to save directly to Downloads and this vault list.",
+                        text = "No .dao-backup or .csv files found yet. Export a backup above or tap 'Import / Restore .dao-backup' to browse your device storage folders.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -411,7 +513,7 @@ fun BackupScreen(
                                         )
                                         val sizeKb = (entry.byteSize / 1024L).coerceAtLeast(1L)
                                         Text(
-                                            text = "${dateFormatter.format(Date(entry.lastModifiedMillis))} • $sizeKb KB • Saved in Downloads & Vault",
+                                            text = "${dateFormatter.format(Date(entry.lastModifiedMillis))} • $sizeKb KB • ${entry.sourceLabel}",
                                             style = MaterialTheme.typography.labelSmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
@@ -447,7 +549,7 @@ fun BackupScreen(
                                         ) {
                                             Icon(
                                                 imageVector = Icons.Default.Delete,
-                                                contentDescription = "Delete ${entry.fileName} from vault",
+                                                contentDescription = "Delete ${entry.fileName}",
                                                 tint = MaterialTheme.colorScheme.error,
                                                 modifier = Modifier.size(18.dp)
                                             )
@@ -504,7 +606,7 @@ fun BackupScreen(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text(
-                        text = "The application generated this random Export Lock Key to lock your .dao-backup file. Copy and save this key—anyone importing this backup file will be asked for it.",
+                        text = "The application generated this random Export Lock Key to lock your .dao-backup file. Copy and save this key—anyone importing this backup file on this or another device will be asked for it.",
                         style = MaterialTheme.typography.bodySmall
                     )
 
@@ -680,71 +782,40 @@ fun BackupScreen(
     }
 
     if (showImportSourceModal) {
-        AlertDialog(
-            onDismissRequest = { showImportSourceModal = false },
-            title = { Text("Select .dao-backup to Import") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    if (encryptedVaultBackups.isEmpty()) {
-                        Text(
-                            text = "No .dao-backup files are stored in the Built-In Backup Vault yet. Export a backup first or browse an external file.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    } else {
-                        Text(
-                            text = "Choose a backup from your Built-In Backup Vault (Downloads):",
-                            style = MaterialTheme.typography.labelLarge
-                        )
-                        encryptedVaultBackups.take(5).forEach { entry ->
-                            OutlinedButton(
-                                onClick = {
-                                    showImportSourceModal = false
-                                    pendingImportUri = null
-                                    pendingImportVaultEntry = entry
-                                    importLockKeyInput = ""
-                                    errorMessage = null
-                                },
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Icon(Icons.Default.Lock, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(Modifier.width(6.dp))
-                                Text(
-                                    text = entry.fileName,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-                        }
-                    }
-
-                    HorizontalDivider()
-
-                    OutlinedButton(
-                        onClick = {
-                            showImportSourceModal = false
-                            runCatching {
-                                openBackupDocumentLauncher.launch(arrayOf("*/*"))
-                            }.onFailure {
-                                errorMessage =
-                                    "System file picker is unavailable on this device. Select a backup from the Built-In Backup Vault list."
-                            }
-                        },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("browse_external_backup_button")
-                    ) {
-                        Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("Browse Device Storage...")
-                    }
-                }
+        DeviceStorageBackupBrowserDialog(
+            discoveredBackups = encryptedVaultBackups,
+            storageShortcuts = storageShortcuts,
+            currentDirectoryListing = currentDirectoryListing,
+            systemChooserNotice = systemChooserNotice,
+            onBrowseDirectory = onBrowseStorageDirectory,
+            onRefreshDiscovered = {
+                onRefreshBackups()
+                onBrowseStorageDirectory(currentDirectoryListing?.currentPath)
             },
-            confirmButton = {
-                TextButton(onClick = { showImportSourceModal = false }) {
-                    Text("Close")
-                }
-            }
+            onSelectBackupEntry = { entry ->
+                showImportSourceModal = false
+                pendingImportUri = null
+                pendingImportVaultEntry = entry
+                importLockKeyInput = ""
+                errorMessage = null
+            },
+            onSelectFilePath = { filePath ->
+                val f = File(filePath.trim())
+                showImportSourceModal = false
+                pendingImportUri = null
+                pendingImportVaultEntry = SavedVaultBackupEntry(
+                    fileName = f.name.ifBlank { filePath.substringAfterLast('/') },
+                    absolutePath = filePath.trim(),
+                    byteSize = if (f.exists()) f.length() else 0L,
+                    lastModifiedMillis = if (f.exists()) f.lastModified() else System.currentTimeMillis(),
+                    isEncryptedBackup = true,
+                    sourceLabel = "Device Storage"
+                )
+                importLockKeyInput = ""
+                errorMessage = null
+            },
+            onLaunchSystemFileChooser = launchSystemFileChooserWithFallback,
+            onDismiss = { showImportSourceModal = false }
         )
     }
 
@@ -761,7 +832,14 @@ fun BackupScreen(
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     if (importVaultEntry != null) {
                         Text(
-                            text = "Selected Backup: ${importVaultEntry.fileName}",
+                            text = "Selected Backup: ${importVaultEntry.fileName} (${importVaultEntry.sourceLabel})",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontFamily = JetBrainsMonoFontFamily,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    } else if (importUri != null) {
+                        Text(
+                            text = "Selected External Backup File",
                             style = MaterialTheme.typography.labelMedium,
                             fontFamily = JetBrainsMonoFontFamily,
                             color = MaterialTheme.colorScheme.primary
@@ -819,6 +897,271 @@ fun BackupScreen(
             }
         )
     }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun DeviceStorageBackupBrowserDialog(
+    discoveredBackups: List<SavedVaultBackupEntry>,
+    storageShortcuts: List<StorageFolderShortcut>,
+    currentDirectoryListing: StorageDirectoryListing?,
+    systemChooserNotice: String?,
+    onBrowseDirectory: (String?) -> Unit,
+    onRefreshDiscovered: () -> Unit,
+    onSelectBackupEntry: (SavedVaultBackupEntry) -> Unit,
+    onSelectFilePath: (String) -> Unit,
+    onLaunchSystemFileChooser: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    var manualFilePath by remember { mutableStateOf("") }
+    val scrollState = rememberScrollState()
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Browse & Select .dao-backup",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f)
+                )
+                IconButton(onClick = onRefreshDiscovered) {
+                    Icon(
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = "Refresh storage scan"
+                    )
+                }
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 460.dp)
+                    .verticalScroll(scrollState),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                // 1. Discovered .dao-backup files across Downloads, Documents & App Vault
+                Text(
+                    text = "Discovered in Downloads & Device Storage (${discoveredBackups.size})",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.primary
+                )
+
+                if (discoveredBackups.isEmpty()) {
+                    Text(
+                        text = "No .dao-backup files automatically detected in Downloads yet. Use the Folder Browser or System File App below to pick a file from another folder.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    discoveredBackups.take(8).forEach { entry ->
+                        OutlinedButton(
+                            onClick = { onSelectBackupEntry(entry) },
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.Lock, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = entry.fileName,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    fontFamily = JetBrainsMonoFontFamily,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = "${entry.sourceLabel} • ${(entry.byteSize / 1024L).coerceAtLeast(1L)} KB",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+
+                HorizontalDivider()
+
+                // 2. Built-In Device Folder Explorer
+                Text(
+                    text = "In-App Device Storage Folder Browser",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.primary
+                )
+
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    storageShortcuts.forEach { shortcut ->
+                        val isCurrent = currentDirectoryListing?.currentPath == shortcut.path
+                        FilterChip(
+                            selected = isCurrent,
+                            onClick = { onBrowseDirectory(shortcut.path) },
+                            label = { Text(shortcut.label, style = MaterialTheme.typography.labelSmall) },
+                            modifier = Modifier.testTag("storage_shortcut_${shortcut.label}")
+                        )
+                    }
+                }
+
+                if (currentDirectoryListing != null) {
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(
+                                    text = currentDirectoryListing.currentPath,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = JetBrainsMonoFontFamily,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                if (currentDirectoryListing.parentPath != null) {
+                                    TextButton(
+                                        onClick = { onBrowseDirectory(currentDirectoryListing.parentPath) },
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                    ) {
+                                        Icon(
+                                            Icons.Default.ArrowUpward,
+                                            contentDescription = "Parent folder",
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("Up", style = MaterialTheme.typography.labelSmall)
+                                    }
+                                }
+                            }
+
+                            if (currentDirectoryListing.entries.isEmpty()) {
+                                Text(
+                                    text = "No subdirectories or .dao-backup files in this folder.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            } else {
+                                currentDirectoryListing.entries.take(15).forEach { node ->
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable {
+                                                if (node.isDirectory) {
+                                                    onBrowseDirectory(node.absolutePath)
+                                                } else {
+                                                    onSelectFilePath(node.absolutePath)
+                                                }
+                                            }
+                                            .padding(vertical = 6.dp, horizontal = 4.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = if (node.isDirectory) Icons.Default.Folder else Icons.Default.Lock,
+                                            contentDescription = null,
+                                            tint = if (node.isDirectory) {
+                                                MaterialTheme.colorScheme.secondary
+                                            } else {
+                                                MaterialTheme.colorScheme.primary
+                                            },
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Text(
+                                            text = node.name,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            fontFamily = if (node.isDirectory) null else JetBrainsMonoFontFamily,
+                                            fontWeight = if (node.isDirectory) FontWeight.Medium else FontWeight.SemiBold,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        if (!node.isDirectory) {
+                                            Text(
+                                                text = "${(node.byteSize / 1024L).coerceAtLeast(1L)} KB",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.primary
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 3. Direct File Path Entry
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedTextField(
+                        value = manualFilePath,
+                        onValueChange = { manualFilePath = it },
+                        label = { Text("Or enter .dao-backup file path") },
+                        placeholder = { Text("/storage/emulated/0/Download/backup.dao-backup") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("manual_backup_path_input")
+                    )
+                    FilledTonalButton(
+                        onClick = { onSelectFilePath(manualFilePath) },
+                        enabled = manualFilePath.trim().isNotEmpty(),
+                        modifier = Modifier.testTag("open_manual_backup_path_button")
+                    ) {
+                        Text("Open")
+                    }
+                }
+
+                HorizontalDivider()
+
+                // 4. Multi-Fallback System File Manager Chooser
+                OutlinedButton(
+                    onClick = onLaunchSystemFileChooser,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("browse_external_backup_button")
+                ) {
+                    Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Open System File Manager App...")
+                }
+
+                if (systemChooserNotice != null) {
+                    Text(
+                        text = systemChooserNotice,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Close")
+            }
+        }
+    )
 }
 
 @OptIn(ExperimentalLayoutApi::class)

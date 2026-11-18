@@ -66,6 +66,8 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -142,7 +144,8 @@ fun ServicesScreen(
         onError: (String) -> Unit
     ) -> Unit,
     onToggleArchiveServiceAccount: (String, Boolean) -> Unit,
-    onDeleteServiceAccountPermanently: (String) -> Unit
+    onDeleteServiceAccountPermanently: (String) -> Unit,
+    onCredentialScreenActiveChange: (Boolean) -> Unit = {}
 ) {
     var searchQuery by rememberSaveable { mutableStateOf("") }
     var showArchivedServices by rememberSaveable { mutableStateOf(false) }
@@ -187,6 +190,16 @@ fun ServicesScreen(
 
     val viewingServiceAccount = remember(serviceAccounts, viewingServiceAccountId) {
         serviceAccounts.firstOrNull { it.serviceAccount.id == viewingServiceAccountId }
+    }
+
+    val isCredentialPageActive = viewingServiceAccount != null || addingOrEditingForServiceId != null
+    LaunchedEffect(isCredentialPageActive) {
+        onCredentialScreenActiveChange(isCredentialPageActive)
+    }
+    DisposableEffect(Unit) {
+        onDispose {
+            onCredentialScreenActiveChange(false)
+        }
     }
 
     val editingServiceAccount = remember(serviceAccounts, editingServiceAccountId) {

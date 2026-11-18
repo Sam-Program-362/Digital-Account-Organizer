@@ -59,6 +59,8 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -107,7 +109,8 @@ fun AccountsScreen(
     onToggleArchiveAccount: (String, Boolean) -> Unit,
     onDeleteAccountPermanently: (String) -> Unit,
     onDecryptSecret: (String?) -> String?,
-    onRequestVerifiedAction: (onVerified: () -> Unit) -> Unit
+    onRequestVerifiedAction: (onVerified: () -> Unit) -> Unit,
+    onCredentialScreenActiveChange: (Boolean) -> Unit = {}
 ) {
     var viewingAccountId by rememberSaveable { mutableStateOf<String?>(null) }
     var deletingAccount by remember { mutableStateOf<AccountWithDetails?>(null) }
@@ -115,6 +118,16 @@ fun AccountsScreen(
 
     val viewingAccount = remember(accounts, viewingAccountId) {
         accounts.firstOrNull { it.account.id == viewingAccountId }
+    }
+
+    val isCredentialPageActive = viewingAccount != null
+    LaunchedEffect(isCredentialPageActive) {
+        onCredentialScreenActiveChange(isCredentialPageActive)
+    }
+    DisposableEffect(Unit) {
+        onDispose {
+            onCredentialScreenActiveChange(false)
+        }
     }
 
     AnimatedContent(

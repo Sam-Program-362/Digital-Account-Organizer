@@ -1,5 +1,8 @@
 package com.example
 
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
@@ -43,6 +46,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -55,6 +59,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.core.util.Consumer
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -107,13 +112,42 @@ class MainActivity : FragmentActivity() {
             val lockState by viewModel.lockState.collectAsStateWithLifecycle()
             val themePreference by viewModel.themePreference.collectAsStateWithLifecycle()
             val colorPalette by viewModel.colorPalette.collectAsStateWithLifecycle()
+            val restrictScreenshotsEntireApp by viewModel.restrictScreenshotsEntireApp.collectAsStateWithLifecycle()
 
-            LaunchedEffect(lockState) {
-                val shouldSecureWindow = when (val current = lockState) {
-                    is LockState.Locked -> true
-                    is LockState.Unlocked -> current.isAppLockEnabled || current.isPasswordManagerLockEnabled
-                    else -> false
+            var isCredentialScreenOrModalActive by remember { mutableStateOf(false) }
+
+            // Handle initial incoming ACTION_VIEW / ACTION_SEND intent (e.g. tapping a .dao-backup file)
+            LaunchedEffect(Unit) {
+                extractIncomingBackupUri(intent)?.let { uri ->
+                    viewModel.setPendingExternalImportUri(uri)
                 }
+            }
+
+            // Handle subsequent incoming intents when MainActivity is already running (singleTop)
+            DisposableEffect(Unit) {
+                val listener = Consumer<Intent> { newIntent ->
+                    extractIncomingBackupUri(newIntent)?.let { uri ->
+                        viewModel.setPendingExternalImportUri(uri)
+                    }
+                }
+                addOnNewIntentListener(listener)
+                onDispose {
+                    removeOnNewIntentListener(listener)
+                }
+            }
+
+            // Selective FLAG_SECURE:
+            // By default, normal browsing screens allow screenshots & screen recording.
+            // FLAG_SECURE is applied only when:
+            // 1. The user enabled "Restrict Screenshots Across Entire App" in Settings, OR
+            // 2. The app is on the Master Lock Unlock screen, OR
+            // 3. The user is actively viewing or editing a credential/password page or secret modal.
+            val shouldSecureWindow =
+                restrictScreenshotsEntireApp ||
+                    lockState is LockState.Locked ||
+                    isCredentialScreenOrModalActive
+
+            LaunchedEffect(shouldSecureWindow) {
                 if (shouldSecureWindow) {
                     window.setFlags(
                         WindowManager.LayoutParams.FLAG_SECURE,
@@ -131,9 +165,29 @@ class MainActivity : FragmentActivity() {
                 OrganizerRootContent(
                     activity = this,
                     viewModel = viewModel,
-                    lockState = lockState
+                    lockState = lockState,
+                    restrictScreenshotsEntireApp = restrictScreenshotsEntireApp,
+                    onCredentialProtectionStateChange = { active ->
+                        isCredentialScreenOrModalActive = active
+                    }
                 )
             }
+        }
+    }
+
+    private fun extractIncomingBackupUri(intent: Intent?): Uri? {
+        if (intent == null) return null
+        return when (intent.action) {
+            Intent.ACTION_VIEW -> intent.data
+            Intent.ACTION_SEND -> {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableExtra(Intent.EXTRA_STREAM) as? Uri
+                }
+            }
+            else -> null
         }
     }
 }
@@ -143,7 +197,9 @@ class MainActivity : FragmentActivity() {
 private fun OrganizerRootContent(
     activity: FragmentActivity,
     viewModel: OrganizerViewModel,
-    lockState: LockState
+    lockState: LockState,
+    restrictScreenshotsEntireApp: Boolean,
+    onCredentialProtectionStateChange: (Boolean) -> Unit
 ) {
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -162,6 +218,8 @@ private fun OrganizerRootContent(
     val oneTimeRecoveryCode by viewModel.oneTimeRecoveryCode.collectAsStateWithLifecycle()
     val duplicateServicePrompt by viewModel.duplicateServicePrompt.collectAsStateWithLifecycle()
     val savedVaultBackups by viewModel.savedVaultBackups.collectAsStateWithLifecycle()
+    val currentDirectoryListing by viewModel.currentDirectoryListing.collectAsStateWithLifecycle()
+    val pendingExternalImportUri by viewModel.pendingExternalImportUri.collectAsStateWithLifecycle()
     val stagedBackup by viewModel.stagedBackup.collectAsStateWithLifecycle()
     val conflictResolutions by viewModel.conflictResolutions.collectAsStateWithLifecycle()
     val generatedExportLockKey by viewModel.generatedExportLockKey.collectAsStateWithLifecycle()
@@ -188,6 +246,31 @@ private fun OrganizerRootContent(
 
     var showVaultVerificationDialog by remember { mutableStateOf(false) }
     var pendingVaultVerifiedAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var isChildCredentialScreenActive by remember { mutableStateOf(false) }
+
+    // If an external .dao-backup file was opened via OS "Open With" or Share, jump to Backup screen
+    LaunchedEffect(pendingExternalImportUri, lockState) {
+        if (pendingExternalImportUri != null && lockState is LockState.Unlocked) {
+            showAccountEditor = false
+            showServiceEditor = false
+            currentDestinationName = OrganizerDestination.BACKUP.name
+        }
+    }
+
+    // Reset child credential flag when switching top-level tabs
+    LaunchedEffect(currentDestinationName) {
+        isChildCredentialScreenActive = false
+    }
+
+    val isAnyCredentialViewActive =
+        showAccountEditor ||
+            isChildCredentialScreenActive ||
+            showVaultVerificationDialog ||
+            !oneTimeRecoveryCode.isNullOrBlank()
+
+    LaunchedEffect(isAnyCredentialViewActive) {
+        onCredentialProtectionStateChange(isAnyCredentialViewActive)
+    }
 
     LaunchedEffect(transientMessage) {
         val msg = transientMessage
@@ -543,7 +626,10 @@ private fun OrganizerRootContent(
                                                         viewModel.deleteAccountPermanently(id)
                                                     },
                                                     onDecryptSecret = { viewModel.decryptSecretField(it) },
-                                                    onRequestVerifiedAction = requestVaultVerifiedAction
+                                                    onRequestVerifiedAction = requestVaultVerifiedAction,
+                                                    onCredentialScreenActiveChange = { active ->
+                                                        isChildCredentialScreenActive = active
+                                                    }
                                                 )
                                             }
 
@@ -625,6 +711,9 @@ private fun OrganizerRootContent(
                                                     },
                                                     onDeleteServiceAccountPermanently = { id ->
                                                         viewModel.deleteServiceAccountPermanently(id)
+                                                    },
+                                                    onCredentialScreenActiveChange = { active ->
+                                                        isChildCredentialScreenActive = active
                                                     }
                                                 )
                                             }
@@ -662,9 +751,24 @@ private fun OrganizerRootContent(
                                                     services = services,
                                                     categories = categories,
                                                     savedVaultBackups = savedVaultBackups,
+                                                    storageShortcuts = viewModel.storageShortcuts,
+                                                    currentDirectoryListing = currentDirectoryListing,
+                                                    externalImportUri = pendingExternalImportUri,
                                                     stagedBackup = stagedBackup,
                                                     conflictResolutions = conflictResolutions,
                                                     generatedExportLockKey = generatedExportLockKey,
+                                                    onBrowseStorageDirectory = { dirPath ->
+                                                        viewModel.browseStorageDirectory(dirPath)
+                                                    },
+                                                    onRefreshBackups = {
+                                                        viewModel.refreshSavedVaultBackups()
+                                                    },
+                                                    onConsumeExternalImportUri = {
+                                                        viewModel.setPendingExternalImportUri(null)
+                                                    },
+                                                    onCredentialModalActiveChange = { active ->
+                                                        isChildCredentialScreenActive = active
+                                                    },
                                                     onPrepareAutoLockedBackup = { mode, accIds, svcIds, catIds, onKeyReady, onError ->
                                                         viewModel.prepareAutoLockedEncryptedBackup(
                                                             mode = mode,
@@ -717,9 +821,13 @@ private fun OrganizerRootContent(
                                                     unlockedState = lockState,
                                                     themePreference = themePreference,
                                                     colorPalette = colorPalette,
+                                                    restrictScreenshotsEntireApp = restrictScreenshotsEntireApp,
                                                     isBiometricHardwareAvailable = isBiometricHardwareAvailable,
                                                     onSelectThemePreference = { viewModel.setThemePreference(it) },
                                                     onSelectColorPalette = { viewModel.setColorPalette(it) },
+                                                    onSetRestrictScreenshotsEntireApp = {
+                                                        viewModel.setRestrictScreenshotsEntireApp(it)
+                                                    },
                                                     onSetPasswordManagerLockEnabled = {
                                                         viewModel.setPasswordManagerLockEnabled(it)
                                                     },
@@ -766,7 +874,10 @@ private fun OrganizerRootContent(
                                                         viewModel.getDecryptedRecoveryCode()
                                                     },
                                                     onDownloadRecoveryCodeOnce = triggerOneTimeRecoveryCodeDownload,
-                                                    onLockNow = { viewModel.lockOrganizerNow() }
+                                                    onLockNow = { viewModel.lockOrganizerNow() },
+                                                    onCredentialModalActiveChange = { active ->
+                                                        isChildCredentialScreenActive = active
+                                                    }
                                                 )
                                             }
                                         }

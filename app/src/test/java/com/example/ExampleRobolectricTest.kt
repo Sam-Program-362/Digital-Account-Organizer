@@ -253,7 +253,7 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun backupVaultStorageSavesEncryptedBackupAndCsvDirectlyWithoutFilePickerCrash() = runBlocking {
+    fun backupVaultStorageSavesBrowsesFoldersAndReadsExternalBackupFiles() = runBlocking {
         val vaultStorage = BackupVaultStorage(context)
         val sampleEncryptedBytes = "encrypted-dao-backup-payload".encodeToByteArray()
 
@@ -269,6 +269,16 @@ class ExampleRobolectricTest {
         val readBack = vaultStorage.readVaultFileBytes(savedBackup.vaultEntry.absolutePath)
         assertArrayEquals(sampleEncryptedBytes, readBack)
 
+        // Simulate a .dao-backup file transferred from another device into an external folder
+        val externalFolder = File(context.cacheDir, "transferred_from_other_phone").apply { mkdirs() }
+        val externalBackupFile = File(externalFolder, "migrated_accounts.dao-backup").apply {
+            writeBytes(sampleEncryptedBytes)
+        }
+        val folderListing = vaultStorage.browseDirectory(externalFolder.absolutePath)
+        assertTrue(folderListing.readable)
+        assertTrue(folderListing.entries.any { it.name == "migrated_accounts.dao-backup" && !it.isDirectory })
+        assertArrayEquals(sampleEncryptedBytes, vaultStorage.readVaultFileBytes(externalBackupFile.absolutePath))
+
         val savedCsv = vaultStorage.saveCsvToDownloadsAndVault(
             fileName = "test-export.csv",
             csvContent = "record_type,name\nACCOUNT,example@gmail.com"
@@ -276,6 +286,14 @@ class ExampleRobolectricTest {
         assertTrue(savedCsv.fileName.endsWith(".csv"))
         assertTrue(vaultStorage.deleteVaultFile(savedBackup.vaultEntry.absolutePath))
         assertTrue(vaultStorage.deleteVaultFile(savedCsv.vaultEntry.absolutePath))
+        externalFolder.deleteRecursively()
+
+        // Verify restrictScreenshotsEntireApp defaults to false and persists when toggled
+        assertFalse(repository.observeRestrictScreenshotsEntireApp().first())
+        repository.setRestrictScreenshotsEntireApp(true)
+        assertTrue(repository.observeRestrictScreenshotsEntireApp().first())
+        repository.setRestrictScreenshotsEntireApp(false)
+        assertFalse(repository.observeRestrictScreenshotsEntireApp().first())
     }
 
     @Test

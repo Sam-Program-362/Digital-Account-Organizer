@@ -12,6 +12,8 @@ import com.example.core.database.SaveServiceAccountOutcome
 import com.example.core.database.SaveServiceOutcome
 import com.example.core.files.BackupVaultStorage
 import com.example.core.files.SavedVaultBackupEntry
+import com.example.core.files.StorageDirectoryListing
+import com.example.core.files.StorageFolderShortcut
 import com.example.core.security.AutoLockTimeout
 import com.example.core.security.DatabaseKeyManager
 import com.example.core.security.LockState
@@ -107,6 +109,14 @@ class OrganizerViewModel(
     private val _savedVaultBackups = MutableStateFlow<List<SavedVaultBackupEntry>>(emptyList())
     val savedVaultBackups: StateFlow<List<SavedVaultBackupEntry>> = _savedVaultBackups.asStateFlow()
 
+    val storageShortcuts: List<StorageFolderShortcut> = backupVaultStorage.getQuickAccessDirectories()
+
+    private val _currentDirectoryListing = MutableStateFlow<StorageDirectoryListing?>(null)
+    val currentDirectoryListing: StateFlow<StorageDirectoryListing?> = _currentDirectoryListing.asStateFlow()
+
+    private val _pendingExternalImportUri = MutableStateFlow<Uri?>(null)
+    val pendingExternalImportUri: StateFlow<Uri?> = _pendingExternalImportUri.asStateFlow()
+
     private val _pendingExportBytes = MutableStateFlow<ByteArray?>(null)
     private val _generatedExportLockKey = MutableStateFlow<String?>(null)
     val generatedExportLockKey: StateFlow<String?> = _generatedExportLockKey.asStateFlow()
@@ -115,6 +125,7 @@ class OrganizerViewModel(
 
     init {
         refreshSavedVaultBackups()
+        browseStorageDirectory(null)
     }
 
     fun refreshSavedVaultBackups() {
@@ -125,6 +136,20 @@ class OrganizerViewModel(
                 _savedVaultBackups.value = list
             }
         }
+    }
+
+    fun browseStorageDirectory(directoryPath: String?) {
+        viewModelScope.launch {
+            runCatching {
+                backupVaultStorage.browseDirectory(directoryPath)
+            }.onSuccess { listing ->
+                _currentDirectoryListing.value = listing
+            }
+        }
+    }
+
+    fun setPendingExternalImportUri(uri: Uri?) {
+        _pendingExternalImportUri.value = uri
     }
 
     private fun <T> unlockedFlow(defaultValue: T, block: () -> Flow<T>): StateFlow<T> {
@@ -169,6 +194,10 @@ class OrganizerViewModel(
 
     val colorPalette: StateFlow<AppColorPalette> = unlockedFlow(AppColorPalette.EMERALD) {
         repository.observeColorPalette()
+    }
+
+    val restrictScreenshotsEntireApp: StateFlow<Boolean> = unlockedFlow(false) {
+        repository.observeRestrictScreenshotsEntireApp()
     }
 
     /**
@@ -825,6 +854,17 @@ class OrganizerViewModel(
     fun setColorPalette(palette: AppColorPalette) {
         viewModelScope.launch {
             repository.setColorPalette(palette)
+        }
+    }
+
+    fun setRestrictScreenshotsEntireApp(enabled: Boolean) {
+        viewModelScope.launch {
+            repository.setRestrictScreenshotsEntireApp(enabled)
+            _transientMessage.value = if (enabled) {
+                "Screenshots & screen recording are now restricted across the entire app."
+            } else {
+                "Screenshots & screen recording are now only restricted on credential and password pages."
+            }
         }
     }
 

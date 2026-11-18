@@ -254,6 +254,23 @@ class OrganizerRepository(
         )
     }
 
+    fun observeRestrictScreenshotsEntireApp(): Flow<Boolean> {
+        return db.appPreferenceDao().observeAllPreferences().map { prefs ->
+            val raw = prefs.firstOrNull { it.key == PREF_KEY_RESTRICT_SCREENSHOTS_ENTIRE_APP }?.value
+            raw.equals("true", ignoreCase = true)
+        }
+    }
+
+    suspend fun setRestrictScreenshotsEntireApp(enabled: Boolean) {
+        db.appPreferenceDao().upsertPreference(
+            AppPreferenceEntity(
+                key = PREF_KEY_RESTRICT_SCREENSHOTS_ENTIRE_APP,
+                value = enabled.toString(),
+                updatedAtEpochMillis = clockMillis()
+            )
+        )
+    }
+
     suspend fun importServiceIconFromUri(uri: Uri): ServiceAssetRecord {
         val entity = assetStorage.importFromUri(uri)
         db.serviceAssetDao().upsertAsset(entity)
@@ -629,5 +646,6 @@ class OrganizerRepository(
     companion object {
         const val PREF_KEY_THEME = "theme_mode"
         const val PREF_KEY_COLOR_PALETTE = "color_palette"
+        const val PREF_KEY_RESTRICT_SCREENSHOTS_ENTIRE_APP = "restrict_screenshots_entire_app"
     }
 }
