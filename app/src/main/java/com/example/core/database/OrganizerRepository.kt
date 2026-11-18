@@ -455,11 +455,13 @@ class OrganizerRepository(
     }
 
     /**
-     * Saves a standalone core Account (independent of any Service) with its own encrypted password and notes.
+     * Saves a standalone core Account (independent of any Service) with its own encrypted password,
+     * encrypted backup/recovery codes, multiple connected phone numbers, date of birth, and avatar color.
      * When editing an existing account ([existingId] != null):
      * - If [clearSavedPassword] is true, the stored password is removed.
      * - If [password] is non-blank, it is encrypted and replaces the stored password.
      * - If [password] is null or blank and [clearSavedPassword] is false, the existing encrypted password is preserved.
+     * - Likewise for [backupCodes] and [clearSavedBackupCodes].
      */
     suspend fun saveAccount(
         existingId: String? = null,
@@ -473,7 +475,12 @@ class OrganizerRepository(
         recoveryEmailReference: String?,
         recoveryPhoneReference: String?,
         notes: String?,
-        status: AccountStatus
+        status: AccountStatus,
+        phoneNumbers: List<String>? = null,
+        dateOfBirth: String? = null,
+        backupCodes: String? = null,
+        clearSavedBackupCodes: Boolean = false,
+        avatarColorHex: String? = null
     ): SaveAccountOutcome {
         val cleanedEmail = Normalizer.cleanOptionalText(email)
         val cleanedUsername = Normalizer.cleanOptionalText(username)
@@ -495,6 +502,20 @@ class OrganizerRepository(
             trimmedNewPassword != null -> encryptSecret(trimmedNewPassword)
             else -> existing?.encryptedPassword
         }
+        val normalizedNewBackupCodes = com.example.domain.model.BackupCodesFormatter.normalizeForStorage(backupCodes)
+        val encryptedCodes = when {
+            clearSavedBackupCodes -> null
+            normalizedNewBackupCodes != null -> encryptSecret(normalizedNewBackupCodes)
+            else -> existing?.encryptedBackupCodes
+        }
+        val effectivePhoneNumbersJson = if (phoneNumbers != null) {
+            AccountEntity.encodePhoneNumbersJson(phoneNumbers)
+        } else {
+            existing?.phoneNumbersJson ?: "[]"
+        }
+        val cleanedDob = Normalizer.cleanOptionalText(dateOfBirth)
+        val cleanedAvatarHex = Normalizer.cleanOptionalText(avatarColorHex)
+
         val entity = AccountEntity(
             id = existing?.id ?: UUID.randomUUID().toString(),
             displayName = effectiveLabel,
@@ -512,7 +533,11 @@ class OrganizerRepository(
             status = status.name,
             createdAtEpochMillis = existing?.createdAtEpochMillis ?: now,
             updatedAtEpochMillis = now,
-            archivedAtEpochMillis = existing?.archivedAtEpochMillis
+            archivedAtEpochMillis = existing?.archivedAtEpochMillis,
+            phoneNumbersJson = effectivePhoneNumbersJson,
+            dateOfBirth = cleanedDob,
+            encryptedBackupCodes = encryptedCodes,
+            avatarColorHex = cleanedAvatarHex
         )
 
         if (existing == null) {

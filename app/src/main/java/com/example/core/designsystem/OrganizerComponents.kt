@@ -248,45 +248,71 @@ fun FormSectionCard(
 }
 
 /**
- * Renders a standalone Account's monogram avatar inside a rounded badge.
+ * Renders a standalone Account's single-letter monogram avatar inside a rounded badge.
+ * Uses ONLY 1 letter: the first letter of the email address (falling back to username/displayName),
+ * and applies the user's personalized profile color palette when [avatarColorHex] is set.
  */
 @Composable
 fun AccountAvatarFrame(
     displayName: String,
     identifier: String?,
     modifier: Modifier = Modifier,
+    email: String? = null,
+    avatarColorHex: String? = null,
     size: Dp = 46.dp
 ) {
     val shape = RoundedCornerShape((size.value * 0.28f).dp)
-    val initials = remember(displayName, identifier) {
-        val source = displayName.ifBlank { identifier.orEmpty() }.trim()
-        source
-            .split(Regex("[\\s@.]+"))
-            .filter { it.isNotEmpty() }
-            .take(2)
-            .joinToString("") { it.first().uppercaseChar().toString() }
-            .ifEmpty { "A" }
+    val singleLetter = remember(displayName, identifier, email) {
+        val effectiveEmail = email ?: identifier?.takeIf { it.contains('@') }
+        com.example.domain.model.AccountRecord.computeSingleAvatarLetter(
+            email = effectiveEmail,
+            identifier = identifier,
+            displayName = displayName
+        )
     }
+    val paletteColor = remember(avatarColorHex) {
+        com.example.domain.model.AccountAvatarColor.fromHex(avatarColorHex)
+    }
+    val containerColor = if (paletteColor != null) {
+        androidx.compose.ui.graphics.Color(paletteColor.containerHex)
+    } else {
+        MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.78f)
+    }
+    val borderColor = if (paletteColor != null) {
+        androidx.compose.ui.graphics.Color(paletteColor.contentHex).copy(alpha = 0.55f)
+    } else {
+        MaterialTheme.colorScheme.outline.copy(alpha = 0.45f)
+    }
+    val textColor = if (paletteColor != null) {
+        androidx.compose.ui.graphics.Color(paletteColor.contentHex)
+    } else {
+        MaterialTheme.colorScheme.onSecondaryContainer
+    }
+
     Box(
         modifier = modifier
             .size(size)
             .clip(shape)
-            .background(MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.75f))
+            .background(containerColor)
             .border(
                 width = 1.dp,
-                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.45f),
+                color = borderColor,
                 shape = shape
             )
             .semantics {
-                contentDescription = "$displayName account avatar"
+                contentDescription = "$displayName account avatar ($singleLetter)"
             },
         contentAlignment = Alignment.Center
     ) {
         Text(
-            text = initials,
-            style = MaterialTheme.typography.titleMedium,
+            text = singleLetter,
+            style = if (size >= 52.dp) {
+                MaterialTheme.typography.titleLarge
+            } else {
+                MaterialTheme.typography.titleMedium
+            },
             fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.onSecondaryContainer
+            color = textColor
         )
     }
 }
@@ -362,8 +388,9 @@ fun ServiceLogoFrame(
 
 /**
  * Google-Password-Manager-style protected row for Password or Notes.
- * Keeps the value masked until the user taps Reveal or Copy, which triggers
- * [onRequestVerifiedAction] (respecting the 5-minute verified session window).
+ * Strictly requires verification before EITHER showing (revealing) OR copying to the clipboard.
+ * When the field is hidden (`revealedText == null` and `!isVerifiedForCurrentReveal`),
+ * both Reveal and Copy trigger [onRequestVerifiedAction].
  */
 @Composable
 fun ProtectedVaultFieldCard(
@@ -376,8 +403,9 @@ fun ProtectedVaultFieldCard(
 ) {
     if (!hasValue) return
     val context = LocalContext.current
-    var revealedText by remember { mutableStateOf<String?>(null) }
-    var copiedFeedback by remember { mutableStateOf(false) }
+    var revealedText by remember(testTagPrefix) { mutableStateOf<String?>(null) }
+    var isVerifiedForCard by remember(testTagPrefix) { mutableStateOf(false) }
+    var copiedFeedback by remember(testTagPrefix) { mutableStateOf(false) }
 
     Surface(
         shape = RoundedCornerShape(12.dp),
@@ -420,8 +448,10 @@ fun ProtectedVaultFieldCard(
                         onClick = {
                             if (revealedText != null) {
                                 revealedText = null
+                                isVerifiedForCard = false
                             } else {
                                 onRequestVerifiedAction {
+                                    isVerifiedForCard = true
                                     revealedText = onDecryptValue()
                                 }
                             }
@@ -440,12 +470,20 @@ fun ProtectedVaultFieldCard(
                     }
                     IconButton(
                         onClick = {
-                            onRequestVerifiedAction {
-                                val plain = onDecryptValue()
+                            val performCopy: () -> Unit = {
+                                isVerifiedForCard = true
+                                val plain = revealedText ?: onDecryptValue()
                                 if (!plain.isNullOrEmpty()) {
                                     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
                                     clipboard?.setPrimaryClip(ClipData.newPlainText(label, plain))
                                     copiedFeedback = true
+                                }
+                            }
+                            if (isVerifiedForCard && revealedText != null) {
+                                performCopy()
+                            } else {
+                                onRequestVerifiedAction {
+                                    performCopy()
                                 }
                             }
                         },
@@ -453,7 +491,7 @@ fun ProtectedVaultFieldCard(
                     ) {
                         Icon(
                             imageVector = Icons.Default.ContentCopy,
-                            contentDescription = "Copy $label",
+                            contentDescription = "Copy $label (requires verification)",
                             modifier = Modifier.size(18.dp)
                         )
                     }
@@ -461,7 +499,7 @@ fun ProtectedVaultFieldCard(
             }
 
             Text(
-                text = revealedText ?: "•••••••••••• (Tap eye icon to verify & reveal)",
+                text = revealedText ?: "•••••••••••• (Verify to reveal or copy)",
                 style = MaterialTheme.typography.bodyMedium,
                 fontFamily = if (isMonospace && revealedText != null) JetBrainsMonoFontFamily else null,
                 color = if (revealedText != null) {
@@ -474,9 +512,228 @@ fun ProtectedVaultFieldCard(
 
             if (copiedFeedback) {
                 Text(
-                    text = "Copied $label to clipboard",
+                    text = "Verified & copied $label to clipboard",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.primary
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Password-Manager-verified vault card for Account Backup / Recovery Codes.
+ * Encrypted at rest (AES-256-GCM + SQLCipher). Requires verification before revealing or copying.
+ * Once verified, renders each individual backup code with a one-tap Quick Copy button plus Copy All.
+ */
+@Composable
+fun ProtectedBackupCodesVaultCard(
+    hasBackupCodes: Boolean,
+    onDecryptCodes: () -> String?,
+    onRequestVerifiedAction: (onVerified: () -> Unit) -> Unit,
+    testTagPrefix: String
+) {
+    if (!hasBackupCodes) return
+    val context = LocalContext.current
+    var revealedCodes by remember(testTagPrefix) { mutableStateOf<List<String>?>(null) }
+    var isVerifiedForCard by remember(testTagPrefix) { mutableStateOf(false) }
+    var copiedNotice by remember(testTagPrefix) { mutableStateOf<String?>(null) }
+
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.28f),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("${testTagPrefix}_card")
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Shield,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Column {
+                        Text(
+                            text = "Backup / Recovery Codes (Encrypted Vault)",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        if (revealedCodes != null) {
+                            Text(
+                                text = "${revealedCodes!!.size} recovery code(s) • Tap any code to quick copy",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(
+                        onClick = {
+                            if (revealedCodes != null) {
+                                revealedCodes = null
+                                isVerifiedForCard = false
+                                copiedNotice = null
+                            } else {
+                                onRequestVerifiedAction {
+                                    isVerifiedForCard = true
+                                    val raw = onDecryptCodes()
+                                    revealedCodes = com.example.domain.model.BackupCodesFormatter.parseCodesList(raw)
+                                }
+                            }
+                        },
+                        modifier = Modifier.testTag("${testTagPrefix}_reveal_button")
+                    ) {
+                        Icon(
+                            imageVector = if (revealedCodes != null) {
+                                Icons.Default.VisibilityOff
+                            } else {
+                                Icons.Default.Visibility
+                            },
+                            contentDescription = if (revealedCodes != null) {
+                                "Hide Backup Codes"
+                            } else {
+                                "Verify & Reveal Backup Codes"
+                            },
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                    IconButton(
+                        onClick = {
+                            val performCopyAll: () -> Unit = {
+                                isVerifiedForCard = true
+                                val codes = revealedCodes ?: com.example.domain.model.BackupCodesFormatter.parseCodesList(onDecryptCodes())
+                                if (codes.isNotEmpty()) {
+                                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                    clipboard?.setPrimaryClip(
+                                        ClipData.newPlainText("Backup Codes", codes.joinToString("\n"))
+                                    )
+                                    copiedNotice = "Copied all ${codes.size} backup codes to clipboard"
+                                }
+                            }
+                            if (isVerifiedForCard && revealedCodes != null) {
+                                performCopyAll()
+                            } else {
+                                onRequestVerifiedAction {
+                                    performCopyAll()
+                                }
+                            }
+                        },
+                        modifier = Modifier.testTag("${testTagPrefix}_copy_all_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ContentCopy,
+                            contentDescription = "Copy All Backup Codes (requires verification)",
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+            }
+
+            val codes = revealedCodes
+            if (codes == null) {
+                Text(
+                    text = "••••-••••   ••••-••••   ••••-•••• (Verify to view or quick-copy codes)",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.testTag("${testTagPrefix}_masked_text")
+                )
+            } else if (codes.isEmpty()) {
+                Text(
+                    text = "No backup codes found.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    codes.forEachIndexed { index, code ->
+                        Surface(
+                            onClick = {
+                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                clipboard?.setPrimaryClip(ClipData.newPlainText("Backup Code #${index + 1}", code))
+                                copiedNotice = "Copied backup code #${index + 1} ($code) to clipboard"
+                            },
+                            shape = RoundedCornerShape(10.dp),
+                            color = MaterialTheme.colorScheme.surface,
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("${testTagPrefix}_code_item_$index")
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text(
+                                        text = "#${index + 1}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        fontFamily = JetBrainsMonoFontFamily
+                                    )
+                                    Text(
+                                        text = code,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        fontFamily = JetBrainsMonoFontFamily,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.ContentCopy,
+                                        contentDescription = "Quick copy code #${index + 1}",
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                    Text(
+                                        text = "Copy",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (copiedNotice != null) {
+                Text(
+                    text = copiedNotice!!,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.Medium
                 )
             }
         }

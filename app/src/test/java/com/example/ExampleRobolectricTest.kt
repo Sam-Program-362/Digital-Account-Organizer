@@ -361,10 +361,31 @@ class ExampleRobolectricTest {
             categoryId = null,
             purpose = "Encrypted Mail",
             recoveryEmailReference = "alice.rec@example.com",
-            recoveryPhoneReference = null,
+            recoveryPhoneReference = "+1-555-9999",
             notes = "Hardware 2FA enabled",
-            status = AccountStatus.ACTIVE
+            status = AccountStatus.ACTIVE,
+            phoneNumbers = listOf("+1-555-0101", "+1-555-0102"),
+            dateOfBirth = "1996-05-15",
+            backupCodes = "1111-2222\n3333-4444\n5555-6666",
+            avatarColorHex = "#3B82F6"
         ) as SaveAccountOutcome.Saved
+
+        assertEquals("A", savedAccount.account.avatarSingleLetter)
+        assertEquals("#3B82F6", savedAccount.account.avatarColorHex)
+        assertEquals(listOf("+1-555-0101", "+1-555-0102"), savedAccount.account.phoneNumbers)
+        assertEquals("+1-555-9999", savedAccount.account.recoveryPhoneReference)
+        assertEquals("1996-05-15", savedAccount.account.dateOfBirth)
+        assertEquals(
+            30,
+            savedAccount.account.calculateAgeYears(java.time.LocalDate.of(2026, 11, 18))
+        )
+        assertTrue(savedAccount.account.hasBackupCodes)
+        assertEquals(
+            listOf("1111-2222", "3333-4444", "5555-6666"),
+            com.example.domain.model.BackupCodesFormatter.parseCodesList(
+                repository.decryptSecret(savedAccount.account.encryptedBackupCodes)
+            )
+        )
 
         val savedService = repository.saveService(
             existingId = null,
@@ -426,10 +447,20 @@ class ExampleRobolectricTest {
 
         val restoredAccounts = repository.observeAccountsWithDetails().first()
         assertEquals(1, restoredAccounts.size)
-        assertEquals("alice@proton.me", restoredAccounts.first().account.email)
+        val restoredAcc = restoredAccounts.first().account
+        assertEquals("alice@proton.me", restoredAcc.email)
+        assertEquals("A", restoredAcc.avatarSingleLetter)
+        assertEquals("#3B82F6", restoredAcc.avatarColorHex)
+        assertEquals(listOf("+1-555-0101", "+1-555-0102"), restoredAcc.phoneNumbers)
+        assertEquals("+1-555-9999", restoredAcc.recoveryPhoneReference)
+        assertEquals("1996-05-15", restoredAcc.dateOfBirth)
         assertEquals(
             "ProtonVaultPassword!1",
-            repository.decryptSecret(restoredAccounts.first().account.encryptedPassword)
+            repository.decryptSecret(restoredAcc.encryptedPassword)
+        )
+        assertEquals(
+            "1111-2222\n3333-4444\n5555-6666",
+            repository.decryptSecret(restoredAcc.encryptedBackupCodes)
         )
         assertEquals(1, restoredAccounts.first().linkedServices.size)
 

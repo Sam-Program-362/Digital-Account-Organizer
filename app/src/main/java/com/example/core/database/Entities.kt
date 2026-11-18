@@ -103,7 +103,8 @@ data class CategoryEntity(
 
 /**
  * Standalone core Account entity (e.g., example123@gmail.com, example321@example.com)
- * independent of any Service, storing its own encrypted password and notes.
+ * independent of any Service, storing its own encrypted password, encrypted backup codes,
+ * multiple connected phone numbers, date of birth, and personalized avatar color.
  */
 @Entity(
     tableName = "accounts",
@@ -142,7 +143,11 @@ data class AccountEntity(
     val status: String,
     val createdAtEpochMillis: Long,
     val updatedAtEpochMillis: Long,
-    val archivedAtEpochMillis: Long?
+    val archivedAtEpochMillis: Long?,
+    val phoneNumbersJson: String = "[]",
+    val dateOfBirth: String? = null,
+    val encryptedBackupCodes: String? = null,
+    val avatarColorHex: String? = null
 ) {
     fun toDomain(): AccountRecord = AccountRecord(
         id = id,
@@ -161,8 +166,35 @@ data class AccountEntity(
         status = runCatching { AccountStatus.valueOf(status) }.getOrDefault(AccountStatus.ACTIVE),
         createdAtEpochMillis = createdAtEpochMillis,
         updatedAtEpochMillis = updatedAtEpochMillis,
-        archivedAtEpochMillis = archivedAtEpochMillis
+        archivedAtEpochMillis = archivedAtEpochMillis,
+        phoneNumbers = parsePhoneNumbersJson(phoneNumbersJson),
+        dateOfBirth = dateOfBirth,
+        encryptedBackupCodes = encryptedBackupCodes,
+        avatarColorHex = avatarColorHex
     )
+
+    companion object {
+        fun encodePhoneNumbersJson(numbers: List<String>): String {
+            val cleaned = numbers.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+            if (cleaned.isEmpty()) return "[]"
+            val arr = org.json.JSONArray()
+            cleaned.forEach { arr.put(it) }
+            return arr.toString()
+        }
+
+        fun parsePhoneNumbersJson(rawJson: String?): List<String> {
+            val text = rawJson?.trim()?.takeIf { it.isNotEmpty() } ?: return emptyList()
+            return runCatching {
+                val arr = org.json.JSONArray(text)
+                buildList {
+                    for (i in 0 until arr.length()) {
+                        val v = arr.optString(i).trim()
+                        if (v.isNotEmpty()) add(v)
+                    }
+                }
+            }.getOrDefault(emptyList())
+        }
+    }
 }
 
 /**

@@ -296,7 +296,7 @@ class DatabaseKeyManager(
         )
         envelopeStore.writeStateAtomically(newState)
         keystoreWrapper.deleteDeviceKey()
-        recordVaultSessionVerified()
+        lastVaultVerifiedAtMillis = null
         refreshUnlockedState(newState)
         return EnableAppLockResult(recoveryCode = recoveryCode)
     }
@@ -403,7 +403,7 @@ class DatabaseKeyManager(
             envelopeCipher.unwrapDekWithRawKey(masterEnvelope, kek)
         }
         backgroundEnteredAtMillis = null
-        recordVaultSessionVerified()
+        lastVaultVerifiedAtMillis = null
         setUnlockedDek(
             dek = dek,
             persisted = persisted
@@ -578,7 +578,7 @@ class DatabaseKeyManager(
             ?: throw IllegalStateException("Biometric unlock is not enabled.")
         val dek = keystoreWrapper.unwrapWithBiometricCipher(authenticatedDecryptCipher, bioEnvelope)
         backgroundEnteredAtMillis = null
-        recordVaultSessionVerified()
+        lastVaultVerifiedAtMillis = null
         setUnlockedDek(
             dek = dek,
             persisted = persisted

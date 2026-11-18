@@ -19,7 +19,7 @@ import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
         ServiceAccountEntity::class,
         AppPreferenceEntity::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 abstract class OrganizerDatabase : RoomDatabase() {
@@ -149,6 +149,20 @@ abstract class OrganizerDatabase : RoomDatabase() {
                 db.execSQL("CREATE INDEX IF NOT EXISTS `index_accounts_normalizedUsername` ON `accounts` (`normalizedUsername`)")
             }
         }
+
+        /**
+         * Forward migration from v2 to v3 adding multiple connected phone numbers (`phoneNumbersJson`),
+         * `dateOfBirth`, AES-256-GCM encrypted account recovery/backup codes (`encryptedBackupCodes`),
+         * and custom single-letter avatar profile color (`avatarColorHex`) to standalone `accounts`.
+         */
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `accounts` ADD COLUMN `phoneNumbersJson` TEXT NOT NULL DEFAULT '[]'")
+                db.execSQL("ALTER TABLE `accounts` ADD COLUMN `dateOfBirth` TEXT")
+                db.execSQL("ALTER TABLE `accounts` ADD COLUMN `encryptedBackupCodes` TEXT")
+                db.execSQL("ALTER TABLE `accounts` ADD COLUMN `avatarColorHex` TEXT")
+            }
+        }
     }
 }
 
@@ -197,7 +211,10 @@ class EncryptedDatabaseFactory(
             }
 
             val db = builder
-                .addMigrations(OrganizerDatabase.MIGRATION_1_2)
+                .addMigrations(
+                    OrganizerDatabase.MIGRATION_1_2,
+                    OrganizerDatabase.MIGRATION_2_3
+                )
                 .build()
             db.openHelper.writableDatabase
             instance = db

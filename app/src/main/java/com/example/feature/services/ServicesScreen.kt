@@ -1555,6 +1555,8 @@ private fun ServiceAccountDetailPage(
                                     AccountAvatarFrame(
                                         displayName = linked.displayName,
                                         identifier = linked.primaryIdentifier,
+                                        email = linked.email,
+                                        avatarColorHex = linked.avatarColorHex,
                                         size = 36.dp
                                     )
                                     Column {
