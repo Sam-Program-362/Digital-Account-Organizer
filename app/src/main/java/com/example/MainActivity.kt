@@ -292,6 +292,7 @@ private fun OrganizerRootContent(
     }
 
     val requestVaultVerifiedAction: (onVerified: () -> Unit) -> Unit = { onVerified ->
+        viewModel.clearVaultSessionVerification()
         if (!viewModel.isVaultVerificationRequired()) {
             onVerified()
         } else {
@@ -499,7 +500,7 @@ private fun OrganizerRootContent(
                                                 showAccountEditor = false
                                                 editingAccountId = null
                                             },
-                                            onSave = { existingId, displayName, email, username, password, clearSavedPassword, categoryId, purpose, recEmail, recPhone, notes, status, onError ->
+                                            onSave = { existingId, displayName, email, username, password, clearSavedPassword, categoryId, purpose, recEmail, recPhone, notes, status, phoneNumbers, dateOfBirth, backupCodes, clearSavedBackupCodes, avatarColorHex, onError ->
                                                 viewModel.saveAccount(
                                                     existingId = existingId,
                                                     displayName = displayName,
@@ -513,6 +514,11 @@ private fun OrganizerRootContent(
                                                     recoveryPhoneReference = recPhone,
                                                     notes = notes,
                                                     status = status,
+                                                    phoneNumbers = phoneNumbers,
+                                                    dateOfBirth = dateOfBirth,
+                                                    backupCodes = backupCodes,
+                                                    clearSavedBackupCodes = clearSavedBackupCodes,
+                                                    avatarColorHex = avatarColorHex,
                                                     onSaved = {
                                                         showAccountEditor = false
                                                         editingAccountId = null

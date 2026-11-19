@@ -436,6 +436,8 @@ private fun RecentAccountRowCard(
             AccountAvatarFrame(
                 displayName = item.account.displayName,
                 identifier = item.account.email ?: item.account.username,
+                email = item.account.email,
+                avatarColorHex = item.account.avatarColorHex,
                 size = 44.dp
             )
             Spacer(modifier = Modifier.width(12.dp))

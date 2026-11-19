@@ -1,12 +1,40 @@
 package com.example.domain.model
 
 import java.security.SecureRandom
+import java.time.LocalDate
+import java.time.Period
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 enum class AccountStatus(val displayLabel: String) {
     ACTIVE("Active"),
     INACTIVE("Inactive"),
     CLOSED("Closed")
+}
+
+enum class AccountAvatarColor(
+    val storageHex: String,
+    val displayLabel: String,
+    val containerHex: Long,
+    val contentHex: Long
+) {
+    EMERALD("#10B981", "Emerald", 0xFF065F46, 0xFF6EE7B7),
+    SAPPHIRE("#3B82F6", "Sapphire", 0xFF1E3A8A, 0xFF93C5FD),
+    VIOLET("#8B5CF6", "Violet", 0xFF4C1D95, 0xFFC4B5FD),
+    AMBER("#F59E0B", "Amber", 0xFF78350F, 0xFFFCD34D),
+    ROSE("#F43F5E", "Crimson", 0xFF881337, 0xFFFDA4AF),
+    CYAN("#06B6D4", "Cyan", 0xFF164E63, 0xFF67E8F9),
+    INDIGO("#6366F1", "Indigo", 0xFF312E81, 0xFFA5B4FC),
+    TEAL("#14B8A6", "Teal", 0xFF134E4A, 0xFF5EEAD4),
+    CORAL("#FB7185", "Coral", 0xFF7F1D1D, 0xFFFECACA),
+    SLATE("#64748B", "Slate", 0xFF1E293B, 0xFFCBD5E1);
+
+    companion object {
+        fun fromHex(hex: String?): AccountAvatarColor? {
+            if (hex.isNullOrBlank()) return null
+            return entries.firstOrNull { it.storageHex.equals(hex.trim(), ignoreCase = true) }
+        }
+    }
 }
 
 enum class ThemePreference(val storageValue: String, val displayLabel: String) {
@@ -89,7 +117,8 @@ data class CategoryWithCount(
 
 /**
  * Represents a standalone core Account (e.g., example123@gmail.com, example321@example.com)
- * independent of any Service, with its own encrypted password and notes.
+ * independent of any Service, with its own encrypted password, encrypted backup codes,
+ * multiple connected phone numbers, date of birth, and personalized avatar color.
  */
 data class AccountRecord(
     val id: String,
@@ -108,7 +137,11 @@ data class AccountRecord(
     val status: AccountStatus,
     val createdAtEpochMillis: Long,
     val updatedAtEpochMillis: Long,
-    val archivedAtEpochMillis: Long?
+    val archivedAtEpochMillis: Long?,
+    val phoneNumbers: List<String> = emptyList(),
+    val dateOfBirth: String? = null,
+    val encryptedBackupCodes: String? = null,
+    val avatarColorHex: String? = null
 ) {
     val isArchived: Boolean
         get() = archivedAtEpochMillis != null
@@ -116,11 +149,94 @@ data class AccountRecord(
     val hasPassword: Boolean
         get() = !encryptedPassword.isNullOrBlank()
 
+    val hasBackupCodes: Boolean
+        get() = !encryptedBackupCodes.isNullOrBlank()
+
     val hasNotes: Boolean
         get() = !notes.isNullOrBlank()
 
     val primaryIdentifier: String
         get() = email ?: username ?: displayName
+
+    /**
+     * Single-letter avatar monogram: uses the first letter of the email address when present,
+     * falling back to username or displayName.
+     */
+    val avatarSingleLetter: String
+        get() = computeSingleAvatarLetter(email = email, identifier = username, displayName = displayName)
+
+    fun calculateAgeYears(today: LocalDate = LocalDate.now()): Int? =
+        DateOfBirthCalculator.calculateAgeYears(dateOfBirth, today)
+
+    companion object {
+        fun computeSingleAvatarLetter(
+            email: String?,
+            identifier: String?,
+            displayName: String
+        ): String {
+            val source = when {
+                !email.isNullOrBlank() -> email.trim()
+                !identifier.isNullOrBlank() -> identifier.trim()
+                else -> displayName.trim()
+            }
+            val ch = source.firstOrNull { it.isLetterOrDigit() } ?: source.firstOrNull()
+            return ch?.uppercaseChar()?.toString() ?: "A"
+        }
+    }
+}
+
+object DateOfBirthCalculator {
+    private val supportedFormatters = listOf(
+        DateTimeFormatter.ISO_LOCAL_DATE,
+        DateTimeFormatter.ofPattern("yyyy/MM/dd", Locale.US),
+        DateTimeFormatter.ofPattern("dd/MM/yyyy", Locale.US),
+        DateTimeFormatter.ofPattern("MM/dd/yyyy", Locale.US),
+        DateTimeFormatter.ofPattern("dd-MM-yyyy", Locale.US)
+    )
+
+    fun parseDate(raw: String?): LocalDate? {
+        val cleaned = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        for (formatter in supportedFormatters) {
+            val parsed = runCatching { LocalDate.parse(cleaned, formatter) }.getOrNull()
+            if (parsed != null) return parsed
+        }
+        return null
+    }
+
+    fun calculateAgeYears(raw: String?, today: LocalDate = LocalDate.now()): Int? {
+        val birthDate = parseDate(raw) ?: return null
+        if (birthDate.isAfter(today)) return null
+        return Period.between(birthDate, today).years.coerceAtLeast(0)
+    }
+
+    fun formatDobWithAge(raw: String?, today: LocalDate = LocalDate.now()): String? {
+        val cleaned = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        val age = calculateAgeYears(cleaned, today)
+        return if (age != null) {
+            "$cleaned ($age yrs old)"
+        } else {
+            cleaned
+        }
+    }
+}
+
+object BackupCodesFormatter {
+    /**
+     * Parses raw user-entered or decrypted backup codes text into clean individual codes.
+     */
+    fun parseCodesList(raw: String?): List<String> {
+        val cleaned = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return emptyList()
+        return cleaned
+            .split(Regex("[\\r\\n,;]+"))
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+    }
+
+    fun normalizeForStorage(raw: String?): String? {
+        val codes = parseCodesList(raw)
+        if (codes.isEmpty()) return null
+        return codes.joinToString("\n")
+    }
 }
 
 data class LinkedServiceSummary(

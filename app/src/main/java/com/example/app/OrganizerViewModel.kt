@@ -219,7 +219,9 @@ class OrganizerViewModel(
                     (item.account.normalizedEmail?.contains(normalizedQuery) == true) ||
                     (item.account.normalizedUsername?.contains(normalizedQuery) == true) ||
                     (item.category?.normalizedName?.contains(normalizedQuery) == true) ||
-                    (item.account.purpose?.lowercase()?.contains(normalizedQuery) == true)
+                    (item.account.purpose?.lowercase()?.contains(normalizedQuery) == true) ||
+                    item.account.phoneNumbers.any { it.lowercase().contains(normalizedQuery) } ||
+                    (item.account.dateOfBirth?.lowercase()?.contains(normalizedQuery) == true)
             }
             matchesArchive && matchesCategory && matchesStatus && matchesQuery
         }.let { filtered ->
@@ -264,6 +266,10 @@ class OrganizerViewModel(
 
     fun recordVaultSessionVerified() {
         keyManager.recordVaultSessionVerified()
+    }
+
+    fun clearVaultSessionVerification() {
+        keyManager.clearVaultSessionVerification()
     }
 
     fun verifyVaultWithMasterPassword(passwordInput: String): Boolean {
@@ -734,6 +740,11 @@ class OrganizerViewModel(
         recoveryPhoneReference: String?,
         notes: String?,
         status: AccountStatus,
+        phoneNumbers: List<String>? = null,
+        dateOfBirth: String? = null,
+        backupCodes: String? = null,
+        clearSavedBackupCodes: Boolean = false,
+        avatarColorHex: String? = null,
         onSaved: () -> Unit,
         onError: (String) -> Unit
     ) {
@@ -751,7 +762,12 @@ class OrganizerViewModel(
                     recoveryEmailReference = recoveryEmailReference,
                     recoveryPhoneReference = recoveryPhoneReference,
                     notes = notes,
-                    status = status
+                    status = status,
+                    phoneNumbers = phoneNumbers,
+                    dateOfBirth = dateOfBirth,
+                    backupCodes = backupCodes,
+                    clearSavedBackupCodes = clearSavedBackupCodes,
+                    avatarColorHex = avatarColorHex
                 )
             ) {
                 is SaveAccountOutcome.Saved -> {

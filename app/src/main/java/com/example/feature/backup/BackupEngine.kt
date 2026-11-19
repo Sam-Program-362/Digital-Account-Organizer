@@ -499,9 +499,13 @@ class BackupEngine(
                 val reEncryptedPwd = incomingAcc.encryptedPassword?.let {
                     keyManager?.encryptSecretField(it) ?: it
                 }
+                val reEncryptedBackupCodes = incomingAcc.encryptedBackupCodes?.let {
+                    keyManager?.encryptSecretField(it) ?: it
+                }
                 val preparedAcc = incomingAcc.copy(
                     categoryId = resolvedCategoryId,
-                    encryptedPassword = reEncryptedPwd
+                    encryptedPassword = reEncryptedPwd,
+                    encryptedBackupCodes = reEncryptedBackupCodes
                 )
                 val conflict = conflictByIncomingId[incomingAcc.id]
                 if (conflict == null) {
@@ -628,6 +632,8 @@ class BackupEngine(
                 "Account Label",
                 "Email",
                 "Username",
+                "Connected Phone Numbers",
+                "Date of Birth",
                 "Category",
                 "Status",
                 "Archived",
@@ -643,6 +649,7 @@ class BackupEngine(
 
         for (account in accounts) {
             val category = account.categoryId?.let { categoriesById[it] }
+            val connectedPhones = AccountEntity.parsePhoneNumbersJson(account.phoneNumbersJson).joinToString("; ")
             val row = listOf(
                 "STANDALONE_ACCOUNT",
                 account.id,
@@ -651,6 +658,8 @@ class BackupEngine(
                 account.displayName,
                 account.email.orEmpty(),
                 account.username.orEmpty(),
+                connectedPhones,
+                account.dateOfBirth.orEmpty(),
                 category?.name.orEmpty(),
                 account.status,
                 if (account.archivedAtEpochMillis != null) "Yes" else "No",
@@ -676,6 +685,8 @@ class BackupEngine(
                 sa.displayName,
                 sa.email.orEmpty(),
                 sa.username.orEmpty(),
+                "",
+                "",
                 category?.name.orEmpty(),
                 sa.status,
                 if (sa.archivedAtEpochMillis != null) "Yes" else "No",
@@ -800,6 +811,12 @@ class BackupEngine(
                         val plainPassword = a.encryptedPassword?.let {
                             keyManager?.decryptSecretField(it) ?: it
                         }
+                        val plainBackupCodes = a.encryptedBackupCodes?.let {
+                            keyManager?.decryptSecretField(it) ?: it
+                        }
+                        val phonesArray = JSONArray().apply {
+                            AccountEntity.parsePhoneNumbersJson(a.phoneNumbersJson).forEach { put(it) }
+                        }
                         put(
                             JSONObject().apply {
                                 put("id", a.id)
@@ -807,6 +824,10 @@ class BackupEngine(
                                 put("email", a.email ?: JSONObject.NULL)
                                 put("username", a.username ?: JSONObject.NULL)
                                 put("password", plainPassword ?: JSONObject.NULL)
+                                put("backupCodes", plainBackupCodes ?: JSONObject.NULL)
+                                put("phoneNumbers", phonesArray)
+                                put("dateOfBirth", a.dateOfBirth ?: JSONObject.NULL)
+                                put("avatarColorHex", a.avatarColorHex ?: JSONObject.NULL)
                                 put("categoryId", a.categoryId ?: JSONObject.NULL)
                                 put("purpose", a.purpose ?: JSONObject.NULL)
                                 put("recoveryEmailReference", a.recoveryEmailReference ?: JSONObject.NULL)
@@ -1029,6 +1050,16 @@ class BackupEngine(
             val email = o.optNullableString("email")
             val username = o.optNullableString("username")
             val password = o.optNullableString("password")
+            val backupCodes = o.optNullableString("backupCodes")
+            val phonesList = buildList {
+                val arr = o.optJSONArray("phoneNumbers")
+                if (arr != null) {
+                    for (pIdx in 0 until arr.length()) {
+                        val p = arr.optString(pIdx).trim()
+                        if (p.isNotEmpty()) add(p)
+                    }
+                }
+            }
             AccountEntity(
                 id = o.getString("id"),
                 displayName = displayName,
@@ -1046,7 +1077,11 @@ class BackupEngine(
                 status = statusStr,
                 createdAtEpochMillis = parseIsoInstant(o.getString("createdAt")),
                 updatedAtEpochMillis = parseIsoInstant(o.getString("updatedAt")),
-                archivedAtEpochMillis = o.optNullableString("archivedAt")?.let { parseIsoInstant(it) }
+                archivedAtEpochMillis = o.optNullableString("archivedAt")?.let { parseIsoInstant(it) },
+                phoneNumbersJson = AccountEntity.encodePhoneNumbersJson(phonesList),
+                dateOfBirth = o.optNullableString("dateOfBirth"),
+                encryptedBackupCodes = backupCodes,
+                avatarColorHex = o.optNullableString("avatarColorHex")
             )
         }
 
