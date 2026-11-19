@@ -1,11 +1,12 @@
 # Digital Account Organizer
 
-**A local-first Android application for organizing personal accounts and service-specific accounts, with an encrypted on-device data store and optional password storage.**
+**A local-first Android application for organizing standalone personal/work accounts and service-specific accounts, featuring an encrypted on-device SQLCipher + AES-256-GCM vault for passwords and account backup codes.**
 
-Digital Account Organizer gives you one place to record the accounts you use, associate them with services, organize them with categories, and keep the information available offline. It does not sign in to those services or manage the accounts on their behalf.
+Digital Account Organizer gives you one offline-first workspace to catalog the accounts you own, manage multiple connected phone numbers and recovery references, store encrypted passwords and 2FA/account recovery codes, associate accounts with user-created services, and transfer your vault across devices with encrypted `.dao-backup` archives. It does not sign in to external services or transmit your credentials over the network.
 
-> **Current source snapshot:** `2.37.1-release` (`versionCode` `203701`)  
-> **Minimum Android version:** Android 8.0 (API 26)  
+> **Current release version:** `3.12.1-release` (`versionCode` `301201`)  
+> **Database schema version:** Room v3 (`MIGRATION_1_2`, `MIGRATION_2_3`)  
+> **Minimum Android version:** Android 8.0 (API 26) • **Target / Compile SDK:** 36  
 > **Application ID:** `com.aistudio.accountorganizer.vxqpmz`
 
 ## Contents
@@ -14,133 +15,119 @@ Digital Account Organizer gives you one place to record the accounts you use, as
 - [How the data model works](#how-the-data-model-works)
 - [Security model](#security-model)
 - [Network and privacy](#network-and-privacy)
-- [Backup and export](#backup-and-export)
+- [Backup, cross-device migration, and export](#backup-cross-device-migration-and-export)
 - [Technology stack](#technology-stack)
 - [Build from source](#build-from-source)
 - [Run tests](#run-tests)
 - [Project layout](#project-layout)
 - [CI and release workflows](#ci-and-release-workflows)
-- [Project status and known limitations](#project-status-and-known-limitations)
+- [Release notes](#release-notes)
 - [Security reporting](#security-reporting)
-- [License](#license)
 
 ## What it does
 
-### Accounts
+### Standalone Accounts
 
-- Create standalone personal or work account records.
-- Store a display name, email address, username, purpose, recovery-contact references, notes, and status.
-- Optionally store an account password. Password values receive field-level AES-256-GCM encryption before being written to the database.
-- Generate passwords locally with the built-in password generator.
-- Reveal or copy a saved password only through the protected password-view flow.
-- Edit, archive, restore, and permanently delete records.
+- **Rich Identity & Personalization:**
+  - Create standalone personal or work account records independent of any service (e.g., primary email identities, banking identities, developer handles).
+  - **Single-Letter Email Monogram & Profile Color Palette:** Account avatars display a single letter — the first letter of the account's email address (falling back to username or label when no email is set) — paired with a customizable 10-color profile palette (`Emerald`, `Sapphire`, `Violet`, `Amber`, `Crimson`, `Cyan`, `Indigo`, `Teal`, `Coral`, `Slate`, or `Theme Default`).
+  - **Date of Birth & Calculated Age:** Store an optional Date of Birth (`YYYY-MM-DD`) via direct input or the integrated Material 3 Date Picker and view the automatically calculated current age on the account detail page.
+  - **Multiple Connected Phone Numbers vs. Single Recovery Phone:** Attach multiple connected phone numbers to a standalone account while keeping the single Recovery Phone Number and Recovery Email Reference separate.
+- **Encrypted Password & Backup Codes Vault:**
+  - Store an optional account password and multi-code Account Backup / Recovery Codes, each encrypted at rest with **AES-256-GCM** before being stored inside the **SQLCipher** database.
+  - Built-in local password generator with real-time strength estimation.
+  - **Strict Verification on Reveal & Copy:** Both revealing (`Show`) and copying (`Copy to Clipboard`) a hidden password, backup code, or protected note require Password Manager verification (Device Lock/Biometrics or Master Password).
+  - **Quick-Copy Backup Codes:** Once unlocked, each saved account backup/recovery code is rendered as an individual interactive chip with one-tap Quick Copy and a Copy All option.
+  - **Blank-on-Edit Protection:** Opening the Edit page never pre-fills or exposes an existing saved password or saved backup codes; fields remain blank with a `"Saved • enter new ... to replace"` indicator and an explicit `"Clear"` chip.
+- **One-Tap Quick Copy on Account Detail Page:**
+  - Tap any non-secret identity or recovery field on the Standalone Account Detail page (Account Name/Label, Account Address/Email, Username, Date of Birth, Purpose, each Connected Phone Number, Recovery Account/Email, or Recovery Phone Number) to copy that specific value directly to the clipboard.
 
-### Services and service accounts
+### Services and Service Accounts
 
-- Create services manually; the application does not require a bundled provider catalogue.
-- Add multiple service-account records to a service.
-- Link a service-account record to a standalone account, or keep it as a separate service-specific record.
-- Add a service website, description, and custom image/icon.
-- Select an image from the device or explicitly request a website logo fetch over HTTPS.
-- Archive services and manage linked records without treating the app as a client for the external service.
+- **User-Created Services:** Create services manually with custom names, website URLs, descriptions, and custom icons (imported from device storage or fetched on demand from the service's HTTPS website).
+- **Full-Screen Detail & Editor Pages:** View services, service account entries, and standalone accounts in dedicated full-screen pages with smooth horizontal slide transitions instead of cramped pop-up dialogs.
+- **Flexible Linking:** Add multiple service-account entries to any service. Link a service entry to an existing standalone account or maintain a service-specific email/username and optional encrypted password.
+- **Exclusive Archived Filter:** Toggle the `"Archived"` filter chip on the Services page to view only archived services (hiding active ones), or manage active services by default.
 
-### Categories and discovery
+### Categories and Discovery
 
-- Create and manage user-defined categories.
-- Assign an optional category to standalone and service-account records.
-- Search and filter records, browse by service or category, and sort account lists.
-- View dashboard counts and recent records.
+- Create and manage user-defined organizational categories with safe reassignment on deletion.
+- Search standalone accounts by label, email address, username, connected phone numbers, date of birth, category, or purpose.
+- Filter by status (`Active`, `Inactive`, `Closed`), category, and archive state, and sort by recently updated, label, email/username, or creation date.
+- View dashboard metrics and recent activity (counting standalone accounts accurately without double-counting service entries).
 
-### App access and appearance
+### App Access, Screenshot Security, and Appearance
 
-- Optional app lock with a master password.
-- Optional biometric unlock where supported and enabled by the user.
-- Recovery-key flow for restoring access when the master password is unavailable.
-- Configurable background auto-lock: immediate, one minute, or five minutes.
-- Light, dark, and system theme modes, plus selectable color palettes.
+- Optional App Lock with an 8+ character Master Password, optional Fingerprint/Biometric unlock, and a permanent encrypted 24-character Recovery Code (with one-time `.txt` download and fingerprint master-password reset support).
+- Configurable background auto-lock (`Immediate`, `1 minute`, `5 minutes`).
+- **Selective & Full-App Screenshot Protection (`FLAG_SECURE`):** Automatically blocks screenshots and screen recording on lock screens and credential viewing/editing pages by default, with an optional **"Restrict Screenshots Across Entire App"** toggle in Settings.
+- Light, Dark, and System theme modes paired with 6 curated color palettes (`Emerald Trust`, `Sapphire Vault`, `Amethyst Cyber`, `Amber Gold`, `Crimson Rose`, `Monochrome Slate`).
 
 ## How the data model works
 
-The app maintains separate records for:
+The app uses Room v3 (`OrganizerDatabase`) with non-destructive migrations (`MIGRATION_1_2`, `MIGRATION_2_3`):
 
 | Record | Purpose |
 | --- | --- |
-| `AccountEntity` | A standalone personal/work account. May contain an encrypted password. |
-| `ServiceEntity` | A user-created service, including optional website details and an icon reference. |
-| `ServiceAccountEntity` | An account associated with one service. It may link to a standalone account or remain independent. |
+| `AccountEntity` | A standalone personal/work account storing display name, email, username, multiple connected phone numbers (`phoneNumbersJson`), `dateOfBirth`, AES-256-GCM `encryptedPassword`, AES-256-GCM `encryptedBackupCodes`, `avatarColorHex`, category, purpose, recovery email/phone references, notes, and lifecycle timestamps. |
+| `ServiceEntity` | A user-created service with name, website URL, description, icon asset reference, and archive state. |
+| `ServiceAccountEntity` | An account entry belonging to a specific `ServiceEntity`. May link to a standalone `AccountEntity` via `linkedAccountId` or use custom credentials with its own optional `encryptedPassword`. |
 | `CategoryEntity` | A user-created organizational category. |
-| `ServiceAssetEntity` | Metadata for a locally stored service image/icon. |
-| `AppPreferenceEntity` | Persisted theme and appearance preferences. |
-
-A service can have multiple service-account records. A service-account record can optionally link to a standalone account. Categories are optional and are not the same thing as services.
+| `ServiceAssetEntity` | Metadata and SHA-256 digest for a locally stored service logo/icon. |
+| `AppPreferenceEntity` | Persisted theme, color palette, and screenshot-restriction preferences. |
 
 ## Security model
 
-The implementation includes several layers of local data protection:
+The implementation combines multiple layers of local protection:
 
-- **Encrypted database:** Room is configured to use SQLCipher for the application database.
-- **Encrypted password fields:** saved account passwords are encrypted separately with AES-256-GCM before database storage.
-- **Key derivation:** Argon2id derives a key-encryption key from the app-lock master password. The current defaults in source are 19 MiB memory, two iterations, and parallelism one.
-- **Key wrapping:** the database encryption key is wrapped using Android Keystore when the app lock is disabled, or password/recovery envelopes when the app lock is enabled. Biometric unlock is an optional additional path.
-- **Recovery:** a separate high-entropy recovery code can restore the database key. Keep it outside the device and do not share it.
-- **Session protection:** the app closes the database when it locks and sets Android's `FLAG_SECURE` while the app is locked or an applicable lock is enabled.
-- **Platform backup exclusions:** app-private data is excluded from the configured Android cloud-backup and device-transfer rules.
+- **Encrypted database:** Room is configured to use SQLCipher (`SupportOpenHelperFactory`) for the on-device database.
+- **Field-level AES-256-GCM encryption:** Saved account passwords, service-account passwords, and standalone account backup/recovery codes are individually encrypted with AES-256-GCM (`ENC1:` prefix + 96-bit random nonce + 128-bit authentication tag + authenticated associated data) under the active 256-bit DEK before being written to SQLCipher.
+- **Argon2id key derivation:** Argon2id derives key-encryption keys from the Master Password and from `.dao-backup` Export Lock Keys (19 MiB memory, 2 iterations, parallelism 1).
+- **Android Keystore & key envelopes:** The 256-bit DEK is wrapped via Android Keystore when App Lock is off, or via Master Password, Biometric Keystore, and Recovery Key envelopes when App Lock is enabled.
+- **Explicit Password Manager verification:** General app unlock does not pre-authorize hidden vault fields. Revealing or copying a hidden password, backup code, or protected note requires verification via Device Lock/Biometrics or Master Password.
+- **Zero-leak edit forms:** Editing an account or service entry never loads existing passwords or backup codes into editable text inputs.
+- **Context-aware `FLAG_SECURE`:** Blocks screenshots and screen recording on lock and credential screens by default, or across the entire app when enabled in Settings.
+- **Platform backup exclusions:** Android Auto Backup and cloud device-transfer rules exclude app-private database and key-envelope files.
 
-**Implementation caveat:** `EncryptedDatabaseFactory` currently falls back to a regular Room database if loading the SQLCipher native library fails. That fallback is intended to accommodate JVM/Robolectric testing, but the branch is not limited to a test-only build. A production build should fail closed instead of silently downgrading database encryption. See [Security and Privacy](SECURITY.md) and [the repository audit](docs/REPOSITORY_AUDIT.md). Do not interpret the presence of SQLCipher in the dependency list as proof that every runtime has successfully initialized it.
-
-The application is not a substitute for device security. It cannot guarantee protection on a rooted or compromised device, against malware running with sufficient privileges, or while sensitive information is intentionally exported to an unencrypted file.
+See [SECURITY.md](SECURITY.md) for full security details, caveats, and vulnerability reporting instructions.
 
 ## Network and privacy
 
-The app is designed to work offline for account management. The current manifest declares `INTERNET` and `ACCESS_NETWORK_STATE` for one explicit network feature: fetching a logo for a service when the user requests it. That fetch:
+Digital Account Organizer operates offline for all account, password, backup-code, and backup-archive operations. The manifest declares `INTERNET` and `ACCESS_NETWORK_STATE` solely for an explicit, user-triggered HTTPS service-logo fetch when creating or editing a service.
 
-- uses HTTPS only;
-- rejects local/internal hostnames and private address ranges;
-- follows a bounded number of redirects;
-- limits the amount of page and image data downloaded; and
-- stores the accepted image locally after image validation/normalization.
+No cloud backend, account-provider OAuth/sign-in, telemetry SDK, or advertising SDK is included. See [PRIVACY.md](PRIVACY.md) for the complete privacy policy and data inventory.
 
-No account-provider sign-in, account synchronization, application-owned cloud API, advertising SDK, or analytics SDK was found in the active application source/dependency set reviewed for this documentation update. A remote website contacted for logo fetching can still observe the request and the device's network address. The app does not need a Gemini API key for the current runtime implementation; the checked-in `.env.example` contains only a commented placeholder.
+## Backup, cross-device migration, and export
 
-See [PRIVACY.md](PRIVACY.md) for the data inventory, exports, network behavior, and retention details.
+The Backup screen is designed for reliable backup and cross-device migration:
 
-## Backup and export
-
-The Backup screen supports:
-
-- **Encrypted `.dao-backup`:** a portable backup protected with a separate backup passphrase using Argon2id and AES-256-GCM. Full and selective export modes are implemented.
-- **Staged restore:** validates and decrypts the archive, previews incoming records, detects identity/possible-duplicate conflicts, and supports skip, keep-both, and replace decisions before committing.
-- **CSV export:** an unencrypted convenience export. Passwords and security metadata are excluded, but the CSV can still contain identifying account information, notes, service details, and recovery-contact references.
-- **Backup vault:** exported backup/CSV files can be saved in the app's internal backup vault and, where available, the device Downloads folder.
-
-The recovery code can also be exported as a plain-text file. Treat that file as a secret. Encrypted backup files, CSV files, and recovery-code files copied to Downloads are outside the app's private database boundary and are not protected by the database encryption layer.
+- **Portable Encrypted `.dao-backup`:**
+  - Protected with an app-generated Export Lock Key (`DAO-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX`) using Argon2id and AES-256-GCM.
+  - Device-independent: any Android device running Digital Account Organizer can restore the `.dao-backup` file as long as you enter its Export Lock Key.
+  - Preserves standalone accounts (including passwords, backup codes, connected phone numbers, date of birth, and avatar colors), service accounts, services, categories, custom service icons, and preferences.
+- **Multi-Path Restore & Storage Browser:**
+  - **Built-In Backup Vault & Downloads Scanner:** Automatically lists `.dao-backup` files saved in the app's Backup Vault or discovered in public `Downloads` and `Documents` folders.
+  - **In-App Device Storage Folder Browser:** Tap **"Browse Device Storage..."** to navigate device folders (`Downloads`, `Documents`, `Internal Storage`, parent/child directories) directly inside the app without crashing on devices lacking a system DocumentsUI activity, with a **"System File Chooser"** button (`ACTION_OPEN_DOCUMENT` $\rightarrow$ `ACTION_GET_CONTENT`) and external **"Open With / Share"** intent support.
+- **Staged Conflict Resolution:** Previews incoming counts and lets you resolve record conflicts (`Skip`, `Replace`, `Keep Both`) before committing inside a single database transaction.
+- **Plaintext CSV Export:** Exports non-secret account and service metadata (including connected phone numbers and date of birth) while strictly excluding all passwords, backup codes, and security keys.
 
 ## Technology stack
 
 | Layer | Implementation |
 | --- | --- |
-| Language | Kotlin |
-| UI | Jetpack Compose, Material 3 |
-| Persistence | Room |
-| Database encryption | SQLCipher for Android |
-| Field encryption | AES-256-GCM |
-| Password-based key derivation | Argon2id (Bouncy Castle) |
+| Language | Kotlin 2.3.20 |
+| UI | Jetpack Compose, Material 3, Adaptive Custom Typography (`Inter`, `Plus Jakarta Sans`, `JetBrains Mono`) |
+| Persistence | Room 2.8.4 (`version = 3`) |
+| Database encryption | SQLCipher for Android (`net.zetetic:sqlcipher-android`) |
+| Field & backup encryption | AES-256-GCM |
+| Password-based key derivation | Argon2id (Bouncy Castle `bcprov-jdk18on`) |
 | Device key protection | Android Keystore |
-| Biometric authentication | AndroidX Biometric |
-| Async work | Kotlin Coroutines and Flow |
-| Tests | JUnit, AndroidX Test, Robolectric |
-| Build | Gradle Kotlin DSL, version catalog |
+| Biometric & device auth | AndroidX Biometric (`BIOMETRIC_STRONG`, `DEVICE_CREDENTIAL`) |
+| Async work | Kotlin Coroutines and StateFlow |
+| Tests | JUnit 4, AndroidX Test, Robolectric |
+| Build | Gradle Kotlin DSL (`compileSdk = 36`, `minSdk = 26`, `targetSdk = 36`) |
 
 ## Build from source
-
-### Requirements
-
-- Android Studio with an Android SDK installation, or a command-line Android SDK.
-- JDK 17 for the release workflow (the separate CI workflow currently configures JDK 21).
-- Gradle `9.3.1`.
-- Android SDK Platform 36 and Android Build Tools 36.0.0, as used by the release workflow.
-
-The supplied source snapshot includes `gradle-wrapper.properties`, but does **not** include the Gradle wrapper scripts or wrapper JAR. Use an installed Gradle 9.3.1 executable, or regenerate the wrapper locally before using `./gradlew`.
 
 ### Build a debug APK
 
@@ -148,15 +135,9 @@ The supplied source snapshot includes `gradle-wrapper.properties`, but does **no
 gradle :app:assembleDebug
 ```
 
-The debug APK is written to:
-
-```text
-app/build/outputs/apk/debug/app-debug.apk
-```
+The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
 
 ### Build a signed release APK
-
-The release signing configuration expects a keystore file (default: `my-upload-key.jks`) and these environment variables:
 
 ```bash
 export KEYSTORE_PATH="$PWD/my-upload-key.jks"
@@ -166,17 +147,13 @@ export KEY_PASSWORD="<key-password>"
 gradle :app:assembleRelease
 ```
 
-The signing alias in `app/build.gradle.kts` is currently fixed to `upload`. Never commit a production keystore, its password, or a decoded keystore file. The CI workflows read signing material from GitHub Actions secrets; see [CI and release workflows](#ci-and-release-workflows).
-
 ## Run tests
 
 ```bash
 gradle :app:testDebugUnitTest
 ```
 
-This runs the configured local JVM and Robolectric test tasks. The repository also contains an Android instrumentation test under `app/src/androidTest`; it is a basic application-context smoke test, not a comprehensive device test suite.
-
-The source package was inspected for this documentation update, but a fresh Gradle build and test run was not performed as part of the documentation work.
+Runs the local JVM and Robolectric test suite verifying standalone account persistence, connected phone numbers, date of birth and age calculation, single-letter avatar monogram logic, encrypted password and backup-code vault operations, storage folder browsing, and `.dao-backup` export/restore round-trips.
 
 ## Project layout
 
@@ -184,46 +161,35 @@ The source package was inspected for this documentation update, but a fresh Grad
 .
 ├── app/
 │   ├── src/main/java/com/example/
-│   │   ├── app/                 # Application container and ViewModel
-│   │   ├── core/database/       # Room entities, DAOs, database, repository
-│   │   ├── core/files/          # Local assets, backup storage, logo fetching
-│   │   ├── core/security/       # Key management, encryption, recovery
-│   │   ├── domain/model/        # Domain records and shared models
-│   │   ├── feature/             # Accounts, services, categories, backup, settings
-│   │   └── ui/theme/            # Theme and typography
-│   ├── src/test/                # JVM and Robolectric tests
-│   └── src/androidTest/         # Instrumentation tests
-├── .github/workflows/           # APK CI and release workflows
-├── public/assets/aistudio/      # Project context and AI Studio working assets
-├── docs/                        # Repository and release documentation
-├── metadata.json
-└── gradle/                      # Gradle version catalog and wrapper properties
+│   │   ├── app/                 # Application container and OrganizerViewModel
+│   │   ├── core/database/       # Room v3 entities, DAOs, migrations, repository
+│   │   ├── core/designsystem/   # Full-screen scaffolds, single-letter avatars, vault cards
+│   │   ├── core/files/          # Local assets, BackupVaultStorage, storage browser, logo fetcher
+│   │   ├── core/security/       # DatabaseKeyManager, Argon2id, AES-256-GCM envelopes, recovery
+│   │   ├── domain/model/        # Domain models, avatar colors, DOB age calculator, backup code parser
+│   │   ├── feature/             # Accounts, services, categories, dashboard, backup, security, settings
+│   │   └── ui/theme/            # Material 3 color palettes and bundled typography
+│   ├── src/test/                # JVM and Robolectric unit test suite
+│   └── src/androidTest/         # Instrumentation smoke tests
+├── .github/workflows/           # GitHub Actions APK CI and release workflows
+├── PRIVACY.md                   # Privacy Policy & data inventory
+├── README.md                    # Project documentation
+├── Release_Note.md              # v3.12.1-release notes & changelog
+├── SECURITY.md                  # Security architecture & vulnerability reporting policy
+└── metadata.json                # Platform metadata
 ```
 
 ## CI and release workflows
 
 | Workflow | Trigger | Behavior |
 | --- | --- | --- |
-| `android-release.yml` | Push to `main`/`master`, or manual dispatch | Runs the configured unit/Robolectric tests, builds and signs an APK, verifies its signature and selected permissions, then uploads a 30-day Actions artifact. It does not publish a GitHub Release. |
-| `release-apk.yml` | Push a `v*` tag, or manual dispatch | Builds and signs an APK, verifies its signature, calculates a SHA-256 checksum, and creates a GitHub Release with the APK asset. |
+| `android-release.yml` | Push to `main`/`master`, or manual dispatch | Runs unit/Robolectric tests, builds and signs the release APK, verifies its signature and manifest permissions, and uploads a 30-day Actions artifact. |
+| `release-apk.yml` | Push a `v*` tag, or manual dispatch | Builds and signs the release APK, verifies its signature, calculates a SHA-256 checksum, and publishes a GitHub Release with the signed APK asset. |
 
-Both workflows require signing secrets. The release workflow's current version input controls the release tag/title and APK filename, but it does not update `app/build.gradle.kts` before building. For tags other than the version already declared in Gradle, the release title can therefore disagree with the version embedded in the APK. See [the repository audit](docs/REPOSITORY_AUDIT.md).
+## Release notes
 
-## Project status and known limitations
-
-- The source snapshot declares version `2.37.1-release` and version code `203701`.
-- The app is Android-only; there is no web client or desktop client in this repository.
-- There is no cloud account, automatic synchronization, or provider sign-in.
-- There is no `LICENSE` file in the supplied repository snapshot. Public visibility alone does not grant permission to reuse, modify, or redistribute the code. Add a license before describing the project as open source.
-- The `public/assets/aistudio/` context package includes older planning documents that describe a no-password organizer and a not-yet-started implementation. Those statements conflict with the current source. Treat the Kotlin implementation and this README as the current implementation reference until the context package is reconciled.
-- See `RELEASE_NOTES.md` for the supplied release-archive audit. Imaginary development-vlog material is kept separate in `docs/FICTIONAL_DEVELOPMENT_VLOG.md` and is not a historical release record.
+See [Release_Note.md](Release_Note.md) for full details on what changed in **`3.12.1-release`**.
 
 ## Security reporting
 
-Please do not publish exploitable vulnerability details in a public issue. Use GitHub's private vulnerability reporting for this repository if it is enabled. If private reporting is unavailable, contact the repository maintainer through the GitHub profile and request a private reporting channel. Include the affected version, Android version/device details, reproduction steps, and impact; do not attach real passwords, recovery keys, or personal account data.
-
-See [SECURITY.md](SECURITY.md) for the reporting policy.
-
-## License
-
-No license file was present in the supplied repository snapshot. Until the project owner adds a license, the repository should not be advertised as open source and downstream users should not assume redistribution or modification rights.
+Do not publish exploitable vulnerability details in a public issue. See [SECURITY.md](SECURITY.md) for private reporting instructions.

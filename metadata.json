@@ -1,6 +1,6 @@
 {
   "name": "Digital Account Organizer",
-  "description": "Local-first, encrypted Android organizer for tracking digital accounts across user-created services and categories without storing passwords.",
+  "description": "Local-first, encrypted Android organizer for standalone personal/work accounts and service accounts, featuring an SQLCipher + AES-256-GCM vault for passwords and backup codes, multiple connected phone numbers, and portable cross-device encrypted backups.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
