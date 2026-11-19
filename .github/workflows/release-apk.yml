@@ -184,7 +184,23 @@ jobs:
       - name: Write Release Notes
         shell: bash
         run: |
-          cp Release_Note.md release-notes.md
+          if [ -f "Release_Note.md" ]; then
+            cp Release_Note.md release-notes.md
+          else
+            cat > release-notes.md <<EOF
+          # Digital Account Organizer ${{ steps.version.outputs.version }}
+
+          ## Release ${{ steps.version.outputs.version }}
+
+          Automated release built, signed, and published by GitHub Actions.
+
+          - **Version:** ${{ steps.version.outputs.version }}
+          - **APK:** \`${{ steps.version.outputs.apk_name }}\`
+          - **APK SHA-256:** \`${{ steps.verify.outputs.apk_sha256 }}\`
+          - **APK Size:** ${{ steps.verify.outputs.apk_size }} bytes
+          - **Source Commit:** ${{ github.sha }}
+          EOF
+          fi
 
       - name: Create GitHub Release with APK
         shell: bash

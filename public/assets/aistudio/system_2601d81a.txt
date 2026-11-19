@@ -1,8 +1,0 @@
-2026-11-17T09:02:24.0780000Z Requested labels: ubuntu-latest
-2026-11-17T09:02:24.0780000Z Job defined at: Sam-Program-362/Digital-Account-Organizer/.github/workflows/android-release.yml@refs/heads/main
-2026-11-17T09:02:24.0780000Z Waiting for a runner to pick up this job...
-2026-11-17T09:02:24.0740000Z Evaluating build-and-sign-release-apk.if
-2026-11-17T09:02:24.0740000Z Evaluating: success()
-2026-11-17T09:02:24.0740000Z Result: true
-2026-11-17T09:02:24.5010000Z Job is about to start running on the hosted runner: GitHub Actions 1000001688
-2026-11-17T09:02:24.5000000Z Job is waiting for a hosted runner to come online.

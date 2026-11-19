@@ -21,7 +21,6 @@ Digital Account Organizer gives you one offline-first workspace to catalog the a
 - [Run tests](#run-tests)
 - [Project layout](#project-layout)
 - [CI and release workflows](#ci-and-release-workflows)
-- [Release notes](#release-notes)
 - [Security reporting](#security-reporting)
 
 ## What it does
@@ -174,7 +173,6 @@ Runs the local JVM and Robolectric test suite verifying standalone account persi
 ├── .github/workflows/           # GitHub Actions APK CI and release workflows
 ├── PRIVACY.md                   # Privacy Policy & data inventory
 ├── README.md                    # Project documentation
-├── Release_Note.md              # v3.12.1-release notes & changelog
 ├── SECURITY.md                  # Security architecture & vulnerability reporting policy
 └── metadata.json                # Platform metadata
 ```
@@ -185,10 +183,6 @@ Runs the local JVM and Robolectric test suite verifying standalone account persi
 | --- | --- | --- |
 | `android-release.yml` | Push to `main`/`master`, or manual dispatch | Runs unit/Robolectric tests, builds and signs the release APK, verifies its signature and manifest permissions, and uploads a 30-day Actions artifact. |
 | `release-apk.yml` | Push a `v*` tag, or manual dispatch | Builds and signs the release APK, verifies its signature, calculates a SHA-256 checksum, and publishes a GitHub Release with the signed APK asset. |
-
-## Release notes
-
-See [Release_Note.md](Release_Note.md) for full details on what changed in **`3.12.1-release`**.
 
 ## Security reporting
 
